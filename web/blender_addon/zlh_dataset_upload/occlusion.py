@@ -62,7 +62,7 @@ def _cache_mesh_samples(
     """预计算并缓存物体表面的世界坐标采样点。"""
     eval_obj = obj.evaluated_get(depsgraph)
 
-    mesh: bpy.types.Mesh | None = eval_obj.data
+    mesh = getattr(eval_obj, "data", None)
     if mesh is None:
         _log(f"[_cache_mesh_samples] {obj.name} eval_obj.data 为 None，回退到 obj.data")
         mesh = obj.data
@@ -205,7 +205,7 @@ def _get_visible_objects(
     MAX_VERTICES = 256
 
     def _has_vertex_in_frustum(obj_eval: bpy.types.Object) -> bool:
-        mesh: bpy.types.Mesh | None = obj_eval.data
+        mesh = obj_eval.data
         if mesh is None or not hasattr(mesh, "vertices"):
             return False
         verts = mesh.vertices
