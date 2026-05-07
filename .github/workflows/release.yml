@@ -14,6 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Extract version from bl_info
+        id: version
+        run: |
+          VER=$(grep '"version"' web/blender_addon/zlh_dataset_upload/__init__.py | sed -E 's/.*\(([0-9, ]+)\).*/\1/' | tr -d ' ')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+
       - name: Create Blender Addon ZIP
         run: |
           mkdir -p release
@@ -24,10 +31,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: "v1.0.${{ github.run_number }}"
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
           body: |
-            ## zlhNode Blender Addon Release v1.0.${{ github.run_number }}
+            ## zlhNode Blender Addon Release ${{ steps.version.outputs.tag }}
 
             ### 自动构建
             此发布由 GitHub Actions 自动打包生成。
