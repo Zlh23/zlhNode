@@ -62,13 +62,14 @@ def _cache_mesh_samples(
     """预计算并缓存物体表面的世界坐标采样点。"""
     eval_obj = obj.evaluated_get(depsgraph)
 
-    mesh = getattr(eval_obj, "data", None)
-    if mesh is None:
+    # 注意：不能用局部变量名 mesh（Blender 5.1 Python 3.13 有 scope bug）
+    _eval_mesh = getattr(eval_obj, "data", None)
+    if _eval_mesh is None:
         _log(f"[_cache_mesh_samples] {obj.name} eval_obj.data 为 None，回退到 obj.data")
-        mesh = obj.data
-    if mesh is None or not hasattr(mesh, "vertices"):
+        _eval_mesh = obj.data
+    if _eval_mesh is None or not hasattr(_eval_mesh, "vertices"):
         return None
-    samples = _sample_mesh_surface(mesh, eval_obj, num_samples)
+    samples = _sample_mesh_surface(_eval_mesh, eval_obj, num_samples)
     _log(f"[_cache_mesh_samples] {obj.name} 采样 {num_samples} 点，实际获取 {len(samples) if samples else 0} 点")
     return samples if samples else None
 
@@ -205,10 +206,10 @@ def _get_visible_objects(
     MAX_VERTICES = 256
 
     def _has_vertex_in_frustum(obj_eval: bpy.types.Object) -> bool:
-        mesh = obj_eval.data
-        if mesh is None or not hasattr(mesh, "vertices"):
+        _eval_mesh = obj_eval.data
+        if _eval_mesh is None or not hasattr(_eval_mesh, "vertices"):
             return False
-        verts = mesh.vertices
+        verts = _eval_mesh.vertices
         total = len(verts)
         if total == 0:
             return False
