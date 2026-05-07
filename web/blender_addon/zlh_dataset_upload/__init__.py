@@ -3,7 +3,7 @@
 bl_info = {
     "name": "zlh 数据集渲染上传",
     "author": "zlhNode",
-    "version": (1, 11, 0),
+    "version": (1, 12, 0),
     "blender": (5, 1, 0),
     "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O）",
     "description": "渲染当前相机、修改物体名称（自动过滤视锥体内物体）、分配到网页格子",
@@ -116,7 +116,7 @@ class ZLH_AddonPreferences(AddonPreferences):
         box.separator()
         row = box.row()
         row.operator("zlh.check_update", text="检查更新", icon="URL")
-        row.label(text="当前版本: 1.11.0")
+        row.label(text="当前版本: 1.12.0")
 
 
 def _register_object_removable():
@@ -247,15 +247,8 @@ def _sample_mesh_surface(
 def _cache_mesh_samples(
     obj: bpy.types.Object, depsgraph, num_samples: int,
 ) -> Optional[List[Vector]]:
-    """预计算并缓存物体表面的世界坐标采样点。"""
-    # 从 depsgraph 获取 evaluated object（确保矩阵和网格是最新的）
-    eval_obj = None
-    try:
-        eval_obj = depsgraph.objects.get(obj.name, None)
-    except Exception:
-        pass
-    if eval_obj is None:
-        eval_obj = obj
+    """预计算并缓存物体表面的世界坐标采样点（使用 evaluated_get 标准 API）。"""
+    eval_obj = obj.evaluated_get(depsgraph)
 
     mesh: bpy.types.Mesh | None = eval_obj.data
     if mesh is None:
@@ -313,14 +306,12 @@ def _get_visible_objects(
     ce = cam.data.clip_end
     from bpy_extras.object_utils import world_to_camera_view
 
-    # 从 depsgraph 获取求值后的相机
-    eval_cam = depsgraph.objects.get(cam.name, None)
-    if eval_cam is None:
-        eval_cam = cam
-
-    # ---- 构建视锥体 6 个平面（使用 eval 相机矩阵） ----
-    frame = eval_cam.data.view_frame(scene=scene)
+    # 用标准 API 获取求值后的相机
+    eval_cam = cam.evaluated_get(depsgraph)
     eval_cam_matrix = eval_cam.matrix_world
+
+    # ---- 构建视锥体 6 个平面 ----
+    frame = cam.data.view_frame(scene=scene)
     near_corners = [eval_cam_matrix @ Vector((p.x, p.y, p.z)) for p in frame]
     cam_pos = eval_cam_matrix.translation
     cam_dir = eval_cam_matrix.to_quaternion() @ Vector((0, 0, -1))
@@ -404,16 +395,14 @@ def _get_visible_objects(
 
     for obj in all_candidates:
         try:
-            # 从 depsgraph 获取 evaluated object
-            obj_eval = depsgraph.objects.get(obj.name, None)
-            if obj_eval is None:
-                obj_eval = obj
+            # 从 depsgraph 获取 evaluated object（标准 API）
+            obj_eval = obj.evaluated_get(depsgraph)
 
             bbox_local = obj.bound_box
             if not bbox_local:
                 continue
 
-            world_mat = obj_eval.matrix_world if obj_eval else obj.matrix_world
+            world_mat = obj_eval.matrix_world
             corners_world = [world_mat @ Vector(p) for p in bbox_local]
             min_c = Vector((
                 min(p.x for p in corners_world),
