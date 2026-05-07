@@ -12,7 +12,6 @@ import shutil
 import uuid
 from typing import Any
 
-import imagehash
 from aiohttp import web
 from PIL import Image
 
@@ -23,9 +22,6 @@ from .bridge_routes import _json, _preflight
 logger = logging.getLogger(__name__)
 
 STATE_VERSION = 5
-
-# 图片去重：phash 汉明距离小于此阈值视为重复图
-PHASH_DUPE_THRESHOLD = 8
 
 
 def _package_dir() -> str:
@@ -137,11 +133,10 @@ def _default_state() -> dict[str, Any]:
 
 
 def _reconcile_images(st: dict[str, Any]) -> None:
-    """清理 images 中 fid 无效或文件不存在的条目，同时清理孤立 hash 缓存。"""
+    """清理 images 中 fid 无效或文件不存在的条目。"""
     raw = st.get("images")
     if not isinstance(raw, list):
         st["images"] = []
-        st["image_hashes"] = {}
         return
     out: list[dict[str, Any]] = []
     seen_fids: set[str] = set()
@@ -152,10 +147,6 @@ def _reconcile_images(st: dict[str, Any]) -> None:
         seen_fids.add(e["fid"])
         out.append(e)
     st["images"] = out
-    # 清理 hash_cache 中已不存在的 fid
-    hc = st.get("image_hashes")
-    if isinstance(hc, dict):
-        st["image_hashes"] = {k: v for k, v in hc.items() if k in seen_fids}
 
 
 def _migrate_v4_to_v5(st: dict[str, Any]) -> dict[str, Any]:
@@ -277,24 +268,8 @@ def _save_image_file(png: bytes) -> str | None:
     return fid
 
 
-def _phash_from_png(png: bytes) -> imagehash.ImageHash | None:
-    """从 PNG bytes 计算 phash，失败返回 None。"""
-    try:
-        im = Image.open(io.BytesIO(png))
-        if im.mode not in ("RGB", "RGBA", "L"):
-            im = im.convert("RGB")
-        return imagehash.phash(im)
-    except Exception:
-        return None
-
-
-def _shorter_outfit(a: str, b: str) -> str:
-    """两个 outfit 取较短的那个。等长时取 a。"""
-    return a if len(a) <= len(b) else b
-
-
-def _save_image_entry(b64: str, outfit: str, scene: str) -> tuple[str | None, dict[str, Any]]:
-    """统一处理：校验 base64 → 转 PNG → phash 去重 → 存文件 → 写入 state → 返回 (fid, images)。"""
+def _save_image_entry(b64: str, outfit: str, scene: str) -> tuple[str | None, list[dict[str, Any]]]:
+    """解码 base64 → 存 PNG → 写入 state → 返回 (fid, images)。"""
     try:
         png = _b64_to_png_bytes(b64)
     except Exception as e:
@@ -302,68 +277,18 @@ def _save_image_entry(b64: str, outfit: str, scene: str) -> tuple[str | None, di
     return _save_image_entry_from_png(png, outfit, scene)
 
 
-def _save_image_entry_from_png(png: bytes, outfit: str, scene: str) -> tuple[str | None, dict[str, Any]]:
-    """与 _save_image_entry 相同，但直接接受已解码的 PNG bytes。"""
-    new_hash = _phash_from_png(png)
+def _save_image_entry_from_png(png: bytes, outfit: str, scene: str) -> tuple[str | None, list[dict[str, Any]]]:
+    """保存 PNG bytes，不重复立即写入。"""
+    fid = _save_image_file(png)
+    if not fid:
+        raise RuntimeError("write_failed")
 
     st = load_state()
     imgs = st.setdefault("images", [])
     if not isinstance(imgs, list):
         imgs = []
         st["images"] = imgs
-
-    # 已有 hash 缓存（fid -> hex）
-    hash_cache: dict[str, str] = st.get("image_hashes") or {}
-    if not isinstance(hash_cache, dict):
-        hash_cache = {}
-
-    # 对比已有图片
-    dupe_fid: str | None = None
-    if new_hash is not None:
-        for entry in imgs:
-            efid = entry.get("fid", "")
-            if not efid or not _valid_file_id(efid):
-                continue
-            hex_hash = hash_cache.get(efid)
-            if hex_hash:
-                try:
-                    existing_hash = imagehash.hex_to_hash(hex_hash)
-                    if new_hash - existing_hash <= PHASH_DUPE_THRESHOLD:
-                        dupe_fid = efid
-                        break
-                except Exception:
-                    continue
-
-    if dupe_fid is not None:
-        # 重复：合并，不保存新文件
-        existing_outfit = ""
-        for entry in imgs:
-            if entry.get("fid") == dupe_fid:
-                existing_outfit = str(entry.get("outfit", "") or "")
-                entry["outfit"] = _shorter_outfit(existing_outfit, outfit)
-                break
-        logger.info(
-            "[dataset] dupe detected: new=%s... existing=%s outfit=%s -> %s",
-            new_hash.__str__()[:12] if new_hash else "?",
-            dupe_fid[:8],
-            existing_outfit,
-            outfit,
-        )
-        save_state(st)
-        return dupe_fid, st["images"]
-
-    # 非重复：正常保存
-    fid = _save_image_file(png)
-    if not fid:
-        raise RuntimeError("write_failed")
-
     imgs.append({"fid": fid, "outfit": outfit, "scene": scene})
-
-    # 缓存新图的 hash
-    if new_hash is not None:
-        hash_cache[fid] = str(new_hash)
-        st["image_hashes"] = hash_cache
-
     save_state(st)
     return fid, st["images"]
 
