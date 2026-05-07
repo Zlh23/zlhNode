@@ -3,7 +3,7 @@
 bl_info = {
     "name": "zlh 数据集渲染上传",
     "author": "zlhNode",
-    "version": (1, 8, 0),
+    "version": (1, 9, 0),
     "blender": (3, 0, 0),
     "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O）",
     "description": "渲染当前相机、修改物体名称（自动过滤视锥体内物体）、分配到网页格子",
@@ -115,7 +115,7 @@ class ZLH_AddonPreferences(AddonPreferences):
         box.separator()
         row = box.row()
         row.operator("zlh.check_update", text="检查更新", icon="URL")
-        row.label(text="当前版本: 1.8.0")
+        row.label(text="当前版本: 1.9.0")
 
 
 def _register_object_removable():
@@ -569,7 +569,9 @@ class ZLH_OT_CheckUpdate(Operator):
     bl_label = "检查更新"
     bl_options = {"REGISTER"}
 
-    def execute(self, context):
+    _do_update: bpy.props.BoolProperty(default=False)
+
+    def invoke(self, context, _event):
         import urllib.request
         try:
             req = urllib.request.Request(
@@ -584,7 +586,6 @@ class ZLH_OT_CheckUpdate(Operator):
                 self.report({"ERROR"}, "无法获取最新版本号")
                 return {"CANCELLED"}
 
-            # 解析 tag，期望格式 v1.2.3
             ver_str = tag.lstrip("v")
             parts = ver_str.split(".")
             latest_ver = tuple(int(p) for p in parts if p.isdigit())
@@ -592,23 +593,75 @@ class ZLH_OT_CheckUpdate(Operator):
             current_ver = bl_info["version"]
 
             if latest_ver > current_ver:
-                html_url = data.get("html_url", "")
-                self.report(
-                    {"INFO"},
-                    f"发现新版本 {tag}（当前 {'.'.join(str(v) for v in current_ver)}），"
-                    f"请前往 {html_url} 下载更新",
-                )
+                assets = data.get("assets", [])
+                download_url = ""
+                for asset in assets:
+                    if asset.get("name") == "zlh_dataset_upload.zip":
+                        download_url = asset.get("browser_download_url", "")
+                        break
+                self.new_tag = tag
+                self.download_url = download_url if download_url else data.get("zipball_url", "")
+                self.html_url = data.get("html_url", "")
+                return context.window_manager.invoke_props_dialog(self, width=450)
             else:
                 self.report({"INFO"}, f"当前已是最新版本 {'.'.join(str(v) for v in current_ver)}")
+                return {"FINISHED"}
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 self.report({"WARNING"}, "GitHub 仓库未找到 Release，请手动检查")
             else:
                 self.report({"ERROR"}, f"检查更新失败 HTTP {e.code}")
+            return {"CANCELLED"}
         except urllib.error.URLError:
             self.report({"ERROR"}, "网络连接失败，请检查网络")
+            return {"CANCELLED"}
         except Exception as e:
             self.report({"ERROR"}, f"检查更新失败: {e}")
+            return {"CANCELLED"}
+
+    def draw(self, _context):
+        layout = self.layout
+        current = ".".join(str(v) for v in bl_info["version"])
+        layout.label(text=f"发现新版本 {self.new_tag}（当前 {current}）")
+        layout.label(text="是否下载并自动安装更新？")
+        layout.separator()
+        row = layout.row()
+        row.operator("wm.url_open", text="手动下载", icon="URL").url = self.html_url
+
+    def execute(self, context):
+        import urllib.request
+        import tempfile
+        import shutil
+
+        current = ".".join(str(v) for v in bl_info["version"])
+        self.report({"INFO"}, f"正在下载 {self.new_tag} …")
+        try:
+            req = urllib.request.Request(
+                self.download_url,
+                headers={"User-Agent": "zlh-blender-addon"},
+            )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                zip_data = resp.read()
+        except Exception as e:
+            self.report({"ERROR"}, f"下载失败: {e}")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "正在安装 …")
+        try:
+            tmp_dir = tempfile.mkdtemp(prefix="zlh_update_")
+            zip_path = os.path.join(tmp_dir, "zlh_dataset_upload.zip")
+            with open(zip_path, "wb") as f:
+                f.write(zip_data)
+
+            bpy.ops.preferences.addon_install(overwrite=True, filepath=zip_path)
+
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as e:
+            self.report({"ERROR"}, f"安装失败: {e}")
+            return {"CANCELLED"}
+
+        bpy.ops.preferences.addon_refresh()
+        self.report({"INFO"}, f"已安装 {self.new_tag}，请前往 编辑→偏好设置→插件 搜索「zlh」并勾选启用")
         return {"FINISHED"}
 
 
