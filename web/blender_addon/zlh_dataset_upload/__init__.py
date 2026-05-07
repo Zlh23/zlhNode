@@ -4,7 +4,7 @@ bl_info = {
     "name": "zlh 数据集渲染上传",
     "author": "zlhNode",
     "version": (1, 9, 0),
-    "blender": (3, 0, 0),
+    "blender": (5, 1, 0),
     "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O）",
     "description": "渲染当前相机、修改物体名称（自动过滤视锥体内物体）、分配到网页格子",
     "category": "Render",
