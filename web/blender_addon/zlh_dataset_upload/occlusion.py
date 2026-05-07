@@ -62,6 +62,7 @@ def _cache_mesh_samples(
     """预计算并缓存物体表面的世界坐标采样点。"""
     eval_obj = obj.evaluated_get(depsgraph)
 
+    mesh: bpy.types.Mesh | None = eval_obj.data
     if mesh is None:
         _log(f"[_cache_mesh_samples] {obj.name} eval_obj.data 为 None，回退到 obj.data")
         mesh = obj.data
