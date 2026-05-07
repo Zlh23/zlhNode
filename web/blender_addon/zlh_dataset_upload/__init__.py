@@ -8,7 +8,7 @@ bl_info = {
     "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O）",
     "description": "渲染当前相机、修改物体名称（自动过滤视锥体内物体）、分配到网页格子",
     "category": "Render",
-    "tracker_url": "https://github.com/zlhNode/zlhNode/releases",
+    "tracker_url": "https://github.com/Zlh23/zlhNode/releases",
 }
 
 import base64
