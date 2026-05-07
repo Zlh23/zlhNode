@@ -1,0 +1,29 @@
+---
+description: 修改 Blender 插件代码后必须更新 bl_info 版本号
+globs: web/blender_addon/**/*.py
+---
+
+# Blender 插件版本号规则
+
+## 规则
+
+每次修改 `web/blender_addon/zlh_dataset_upload/__init__.py` 中的功能代码后，**必须同时更新**：
+
+1. `bl_info["version"]` 中的版本号（元组）
+2. `ZLH_AddonPreferences.draw()` 中显示的版本号字符串
+
+## 版本号策略
+
+- **主版本 (x.0.0)**：重大架构变更、不兼容的 API 改动
+- **次版本 (0.x.0)**：新增功能、核心逻辑变更（如本文的遮挡检测重构）
+- **修订版本 (0.0.x)**：Bug 修复、小优化、文字修改
+
+## 为什么
+
+Blender 插件的「检查更新」功能通过比较 GitHub Release tag 与 `bl_info["version"]` 来判断是否有新版本。如果不更新版本号，用户将无法收到更新推送。
+
+## 检查清单
+
+修改完插件后确认：
+- [ ] `bl_info["version"]` 已递增
+- [ ] `draw()` 中的版本字符串已同步
