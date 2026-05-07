@@ -17,7 +17,7 @@ jobs:
       - name: Extract version from bl_info
         id: version
         run: |
-          VER=$(grep '"version"' web/blender_addon/zlh_dataset_upload/__init__.py | sed -E 's/.*\(([0-9, ]+)\).*/\1/' | tr -d ' ')
+          VER=$(grep '"version"' web/blender_addon/zlh_dataset_upload/__init__.py | sed -E 's/.*\(([0-9, ]+)\).*/\1/' | tr -d ' ' | tr ',' '.')
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "tag=v$VER" >> "$GITHUB_OUTPUT"
 
