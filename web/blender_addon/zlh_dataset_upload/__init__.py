@@ -1,9 +1,18 @@
 """渲染当前激活相机视图：过滤视锥体内物体名字后提交到网页格子。"""
 
+import datetime
+
+
+def _log(msg: str):
+    """带时间戳的日志，方便在 Blender 控制台追踪各步骤。"""
+    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"[zlh][{ts}] {msg}")
+
+
 bl_info = {
     "name": "zlh 数据集渲染上传",
     "author": "zlhNode",
-    "version": (1, 12, 0),
+    "version": (1, 13, 0),
     "blender": (5, 1, 0),
     "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O）",
     "description": "渲染当前相机、修改物体名称（自动过滤视锥体内物体）、分配到网页格子",
@@ -116,7 +125,7 @@ class ZLH_AddonPreferences(AddonPreferences):
         box.separator()
         row = box.row()
         row.operator("zlh.check_update", text="检查更新", icon="URL")
-        row.label(text="当前版本: 1.12.0")
+        row.label(text="当前版本: 1.13.0")
 
 
 def _register_object_removable():
@@ -252,11 +261,14 @@ def _cache_mesh_samples(
 
     mesh: bpy.types.Mesh | None = eval_obj.data
     if mesh is None:
+        _log(f"[_cache_mesh_samples] {obj.name} eval_obj.data 为 None，回退到 obj.data")
         mesh = obj.data
     if mesh is None or not hasattr(mesh, "vertices"):
+        _log(f"[_cache_mesh_samples] {obj.name} 无网格数据，返回 None")
         return None
     # 使用 evaluated object 的世界矩阵，确保变形/修改器生效
     samples = _sample_mesh_surface(mesh, eval_obj, num_samples)
+    _log(f"[_cache_mesh_samples] {obj.name} 采样 {num_samples} 点，实际获取 {len(samples) if samples else 0} 点")
     return samples if samples else None
 
 
@@ -269,10 +281,11 @@ def _is_occluded(
 ) -> bool:
     """通过光线投射判断物体是否被遮挡（使用预缓存的采样点）。"""
     occluded_count = 0
-    for pt in obj_samples:
+    for idx, pt in enumerate(obj_samples):
         direction = pt - cam_pos
         dist = direction.length
         if dist < 1e-6:
+            _log(f"[_is_occluded] {obj.name} 采样点 {idx} 与相机重合，跳过")
             continue
         direction.normalize()
         result, _hit_pos, _hit_normal, hit_obj, _, _ = scene.ray_cast(
@@ -280,7 +293,10 @@ def _is_occluded(
         )
         if result and hit_obj != obj:
             occluded_count += 1
-    return (occluded_count / len(obj_samples)) > occlusion_threshold
+            _log(f"[_is_occluded] {obj.name} 采样点 {idx}/{len(obj_samples)} 被 {hit_obj.name} 遮挡")
+    ratio = occluded_count / len(obj_samples) if obj_samples else 0
+    _log(f"[_is_occluded] {obj.name} 遮挡比例 {occluded_count}/{len(obj_samples)}={ratio:.2f} 阈值={occlusion_threshold} 判定={'遮挡' if ratio > occlusion_threshold else '可见'}")
+    return ratio > occlusion_threshold
 
 
 def _get_visible_objects(
@@ -299,6 +315,7 @@ def _get_visible_objects(
     scene = context.scene
     cam = scene.camera
     if cam is None:
+        _log("[_get_visible_objects] 场景中没有相机，返回空")
         return set(), []
 
     depsgraph = context.evaluated_depsgraph_get()
@@ -310,11 +327,17 @@ def _get_visible_objects(
     eval_cam = cam.evaluated_get(depsgraph)
     eval_cam_matrix = eval_cam.matrix_world
 
+    _log(f"[_get_visible_objects] 相机={cam.name} clip_start={cs} clip_end={ce}")
+    _log(f"[_get_visible_objects] 相机矩阵平移={eval_cam_matrix.translation}")
+
     # ---- 构建视锥体 6 个平面 ----
     frame = cam.data.view_frame(scene=scene)
+    _log(f"[_get_visible_objects] view_frame 近平面角点（局部）={[Vector((p.x, p.y, p.z)) for p in frame]}")
     near_corners = [eval_cam_matrix @ Vector((p.x, p.y, p.z)) for p in frame]
     cam_pos = eval_cam_matrix.translation
     cam_dir = eval_cam_matrix.to_quaternion() @ Vector((0, 0, -1))
+    _log(f"[_get_visible_objects] 近平面角点（世界）={near_corners}")
+    _log(f"[_get_visible_objects] 相机位置={cam_pos} 朝向={cam_dir}")
 
     def _plane_from_three(a: Vector, b: Vector, c: Vector) -> tuple[Vector, float]:
         n = (b - a).cross(c - a).normalized()
@@ -324,12 +347,14 @@ def _get_visible_objects(
     n_near, d_near = _plane_from_three(near_corners[0], near_corners[1], near_corners[2])
     if n_near.dot(sum(near_corners, Vector()) / 4 - cam_pos) < 0:
         n_near, d_near = -n_near, -d_near
+    _log(f"[_get_visible_objects] 近平面 n={n_near} d={d_near}")
 
     far_corners = [p + cam_dir * (ce - cs) for p in near_corners]
     n_far, d_far = _plane_from_three(far_corners[0], far_corners[2], far_corners[1])
     near_center = sum(near_corners, Vector()) / 4
     if n_far.dot(near_center - (near_center + cam_dir * (ce - cs))) < 0:
         n_far, d_far = -n_far, -d_far
+    _log(f"[_get_visible_objects] 远平面 n={n_far} d={d_far}")
 
     side_planes: list[tuple[Vector, float]] = []
     for i in range(4):
@@ -340,6 +365,7 @@ def _get_visible_objects(
         side_planes.append((n, d))
 
     frustum_planes = [*side_planes, (n_near, d_near), (n_far, d_far)]
+    _log(f"[_get_visible_objects] 视锥体 6 个平面已构建")
 
     def _aabb_in_frustum(min_c: Vector, max_c: Vector) -> bool:
         for n, d in frustum_planes:
@@ -376,30 +402,48 @@ def _get_visible_objects(
     # 先收集所有可能物体，判断是否有 MESH 类型
     all_candidates: list[bpy.types.Object] = []
     have_mesh = False
-    for obj in scene.objects:
+    scene_objects = list(scene.objects)
+    _log(f"[_get_visible_objects] 场景中共 {len(scene_objects)} 个物体")
+
+    for obj in scene_objects:
         try:
             if obj.type not in visible_types:
+                _log(f"[_get_visible_objects]   跳过 {obj.name} 类型={obj.type}（不在可见类型中）")
                 continue
-            if obj.hide_get() or not obj.visible_get():
+            if obj.hide_get():
+                _log(f"[_get_visible_objects]   跳过 {obj.name} hide_get=True")
+                continue
+            if not obj.visible_get():
+                _log(f"[_get_visible_objects]   跳过 {obj.name} visible_get=False")
                 continue
             if hidden_set and obj.name in hidden_set:
+                _log(f"[_get_visible_objects]   跳过 {obj.name}（在当前 hidden_set 中）")
                 continue
             if obj.type == "MESH":
                 have_mesh = True
             all_candidates.append(obj)
-        except Exception:
+            _log(f"[_get_visible_objects]   候选 +{obj.name} type={obj.type}")
+        except Exception as e:
+            _log(f"[_get_visible_objects]   候选收集异常（{obj.name}）: {e}")
             continue
+
+    _log(f"[_get_visible_objects] 候选物体共 {len(all_candidates)} 个, have_mesh={have_mesh}")
 
     all_names: set[str] = set()
     removable_list: list[tuple[str, bpy.types.Object]] = []
+    passed_aabb = 0
+    passed_vertex = 0
+    passed_occlusion = 0
 
     for obj in all_candidates:
         try:
             # 从 depsgraph 获取 evaluated object（标准 API）
             obj_eval = obj.evaluated_get(depsgraph)
+            _log(f"[_get_visible_objects] 处理 {obj.name}：evaluated_get 成功")
 
             bbox_local = obj.bound_box
             if not bbox_local:
+                _log(f"[_get_visible_objects]   {obj.name} bound_box 为空，跳过")
                 continue
 
             world_mat = obj_eval.matrix_world
@@ -414,11 +458,19 @@ def _get_visible_objects(
                 max(p.y for p in corners_world),
                 max(p.z for p in corners_world),
             ))
+            _log(f"[_get_visible_objects]   {obj.name} AABB min={min_c} max={max_c}")
 
             if not _aabb_in_frustum(min_c, max_c):
+                _log(f"[_get_visible_objects]   {obj.name} AABB 视锥体粗筛 失败")
                 continue
+            passed_aabb += 1
+            _log(f"[_get_visible_objects]   {obj.name} AABB 视锥体粗筛 通过")
+
             if not _has_vertex_in_frustum(obj_eval):
+                _log(f"[_get_visible_objects]   {obj.name} 顶点 NDC 检测 失败")
                 continue
+            passed_vertex += 1
+            _log(f"[_get_visible_objects]   {obj.name} 顶点 NDC 检测 通过")
 
             # 遮挡检测
             if have_mesh and obj.type == "MESH":
@@ -426,16 +478,33 @@ def _get_visible_objects(
                 if sample_cache is not None:
                     obj_samples = sample_cache.get(obj.name)
                 if obj_samples is None:
+                    _log(f"[_get_visible_objects]   {obj.name} 开始采样遮挡检测（采样 50 点）")
                     obj_samples = _cache_mesh_samples(obj, depsgraph, 50)
-                if obj_samples and _is_occluded(scene, cam_pos, obj, obj_samples, depsgraph):
-                    continue
+                if obj_samples:
+                    _log(f"[_get_visible_objects]   {obj.name} 采样点 {len(obj_samples)} 个，进行射线检测")
+                    is_occ = _is_occluded(scene, cam_pos, obj, obj_samples, depsgraph)
+                    _log(f"[_get_visible_objects]   {obj.name} 遮挡检测结果: occluded={is_occ}")
+                    if is_occ:
+                        continue
+                else:
+                    _log(f"[_get_visible_objects]   {obj.name} 采样返回空，视为未遮挡")
+            else:
+                _log(f"[_get_visible_objects]   {obj.name} 非 MESH 或场景无 MESH，跳过遮挡检测")
+            passed_occlusion += 1
 
             all_names.add(obj.name)
+            _log(f"[_get_visible_objects]   {obj.name} 最终判定为 可见 ✅")
             if getattr(obj, "zlh_removable", False):
                 removable_list.append((obj.name, obj))
-        except Exception:
+                _log(f"[_get_visible_objects]   {obj.name} 标记为 removable")
+        except Exception as e:
+            _log(f"[_get_visible_objects]   {obj.name} 处理异常: {e}")
+            import traceback
+            _log(f"[_get_visible_objects]   traceback: {traceback.format_exc()}")
             continue
 
+    _log(f"[_get_visible_objects] 汇总: AABB通过={passed_aabb} 顶点NDC通过={passed_vertex} 遮挡检测通过={passed_occlusion} 最终可见={len(all_names)}")
+    _log(f"[_get_visible_objects] 可见物体列表: {sorted(all_names)}")
     return all_names, removable_list
 
 
@@ -483,13 +552,20 @@ def _enumerate_effective_combinations(
     depsgraph = context.evaluated_depsgraph_get()
     cam_pos = cam.matrix_world.translation
 
+    _log(f"[_enumerate_effective_combinations] 开始枚举组合，removable 物体数={len(removable_names)}")
+    _log(f"[_enumerate_effective_combinations] removable 名称列表: {removable_names}")
+    _log(f"[_enumerate_effective_combinations] all_visible 总数={len(all_visible)}: {sorted(all_visible)}")
+
     sample_cache: Dict[str, List[Vector]] = {}
+    cached_count = 0
     for name in all_visible:
         obj = scene.objects.get(name)
         if obj and obj.type == "MESH":
             samples = _cache_mesh_samples(obj, depsgraph, 50)
             if samples:
                 sample_cache[name] = samples
+                cached_count += 1
+    _log(f"[_enumerate_effective_combinations] 采样缓存完成：共缓存 {cached_count} 个 MESH 物体")
 
     # 记住原始 hide_render 状态
     orig_hide: Dict[str, bool] = {}
@@ -500,6 +576,7 @@ def _enumerate_effective_combinations(
 
     n = len(removable_names)
     total_combinations = 1 << n
+    _log(f"[_enumerate_effective_combinations] 理论组合数: {total_combinations}")
 
     seen_signatures: set[tuple[str, ...]] = set()
     effective: List[Tuple[int, set[str]]] = []
@@ -523,17 +600,24 @@ def _enumerate_effective_combinations(
             depsgraph = context.evaluated_depsgraph_get()
 
             # 对该组合重新做遮挡检测
+            _log(f"[_enumerate_effective_combinations] 组合 mask={mask}（隐藏={current_hidden if current_hidden else '无'}）开始检测")
             vis, _ = _get_visible_objects(
                 context,
                 hidden_set=current_hidden,
                 sample_cache=sample_cache,
             )
+            _log(f"[_enumerate_effective_combinations] 组合 mask={mask} 可见物体数={len(vis)}")
 
             # 生成签名用于去重
             sig = tuple(sorted(vis))
             if sig not in seen_signatures:
                 seen_signatures.add(sig)
                 effective.append((mask, vis))
+                _log(f"[_enumerate_effective_combinations] 组合 mask={mask} 新增有效组合，可见={sorted(vis)}")
+            else:
+                _log(f"[_enumerate_effective_combinations] 组合 mask={mask} 重复，跳过")
+
+        _log(f"[_enumerate_effective_combinations] 枚举完成：有效组合数={len(effective)}")
 
     finally:
         # 恢复原始 hide_render 状态
@@ -583,34 +667,47 @@ class ZLH_OT_RenderUpload(Operator):
     def invoke(self, context, _event):
         scene = context.scene
         if scene.camera is None:
+            _log("[invoke] 场景中没有激活相机")
             self.report({"ERROR"}, "场景中没有激活相机")
             return {"CANCELLED"}
         base = _normalize_base(_prefs(context).api_base)
         if not base.startswith(("http://", "https://")):
+            _log(f"[invoke] API 根地址无效: {base}")
             self.report({"ERROR"}, "API 根地址需以 http:// 或 https:// 开头")
             return {"CANCELLED"}
 
+        _log("[invoke] ===== 开始 _get_visible_objects 第一次检测 =====")
         # 第 1 步：获取所有在视锥体内的物体
         all_visible, removable_list = _get_visible_objects(context)
+        _log(f"[invoke] _get_visible_objects 返回: visible={len(all_visible)} 个, removable={len(removable_list)} 个")
         if not all_visible:
+            _log("[invoke] ★★★ 相机视锥体内没有可见物体 ★★★")
             self.report({"WARNING"}, "相机视锥体内没有可见物体")
             return {"CANCELLED"}
 
         self._removable_names = [name for name, _ in removable_list]
+        _log(f"[invoke] visible 物体: {sorted(all_visible)}")
+        _log(f"[invoke] removable 物体: {self._removable_names}")
 
         if not self._removable_names:
+            _log("[invoke] 无 removable 物体，直接单张渲染")
             self.mode = "SINGLE"
             self._precomputed = [(0, all_visible)]
             return self.execute(context)
 
         # 第 2 步：枚举所有组合，遮挡检测 + 去重
+        _log("[invoke] ===== 开始 _enumerate_effective_combinations 组合枚举 =====")
         self.report({"INFO"}, "正在分析遮挡关系，计算有效组合…")
         removable_objs = [obj for _, obj in removable_list]
         try:
             effective = _enumerate_effective_combinations(
                 context, all_visible, self._removable_names, removable_objs,
             )
+            _log(f"[invoke] _enumerate_effective_combinations 返回 {len(effective)} 种有效组合")
         except Exception as e:
+            _log(f"[invoke] 遮挡分析异常: {e}")
+            import traceback
+            _log(f"[invoke] traceback: {traceback.format_exc()}")
             self.report({"ERROR"}, f"遮挡分析失败: {e}")
             return {"CANCELLED"}
 
@@ -618,12 +715,15 @@ class ZLH_OT_RenderUpload(Operator):
         self._precomputed = list(effective)
 
         if len(effective) == 0:
+            _log("[invoke] ★★★ 所有组合的遮挡分析结果为空 ★★★")
             self.report({"WARNING"}, "所有组合的遮挡分析结果为空，请检查场景")
             return {"CANCELLED"}
 
         if len(effective) == 1:
+            _log("[invoke] 只有 1 种有效组合，直接渲染")
             return self.execute(context)
 
+        _log(f"[invoke] 弹出选择对话框: {len(effective)} 种有效组合")
         return context.window_manager.invoke_props_dialog(self, width=520)
 
     def draw(self, context):
@@ -661,6 +761,7 @@ class ZLH_OT_RenderUpload(Operator):
         box.label(text="确认后将开始渲染，是否继续？", icon="QUESTION")
 
     def execute(self, context):
+        _log("[execute] 开始执行渲染流程")
         if not ZLH_OT_RenderUpload._render_lock.acquire(blocking=False):
             self.report({"WARNING"}, "渲染已在执行中，请等待完成")
             return {"CANCELLED"}
@@ -701,6 +802,8 @@ class ZLH_OT_RenderUpload(Operator):
             else:
                 masks_to_render = []
 
+            _log(f"[execute] mode={self.mode} 需渲染 {len(masks_to_render)} 张")
+
             # 收集所有可能被隐藏/恢复的 removable 物体
             affected: set[str] = set()
             for _, vis_names in masks_to_render:
@@ -722,10 +825,12 @@ class ZLH_OT_RenderUpload(Operator):
             for idx, (_mask, vis_names) in enumerate(masks_to_render):
                 wm.progress_update(idx)
                 self.report({"INFO"}, f"渲染中… {idx + 1}/{total}")
+                _log(f"[execute] 渲染 {idx + 1}/{total} vis_names={sorted(vis_names)}")
 
                 try:
                     _render_and_upload(context, base, output_dir, vis_names, affected, orig_hide)
                     uploaded += 1
+                    _log(f"[execute] 渲染上传成功 {idx + 1}/{total}")
                 except urllib.error.HTTPError as e:
                     err_text = ""
                     try:
@@ -733,22 +838,29 @@ class ZLH_OT_RenderUpload(Operator):
                     except Exception:
                         pass
                     msg = f"第 {idx + 1}/{total} 上传失败 HTTP {e.code} {err_text}"
+                    _log(f"[execute] 错误: {msg}")
                     errors.append(msg)
                     self.report({"WARNING"}, msg)
                 except urllib.error.URLError as e:
                     msg = f"第 {idx + 1}/{total} 网络错误: {e.reason}"
+                    _log(f"[execute] 错误: {msg}")
                     errors.append(msg)
                     self.report({"WARNING"}, msg)
                 except Exception as e:
                     msg = f"第 {idx + 1}/{total} 错误: {e}"
+                    _log(f"[execute] 错误: {msg}")
+                    import traceback
+                    _log(f"[execute] traceback: {traceback.format_exc()}")
                     errors.append(msg)
                     self.report({"WARNING"}, msg)
 
             wm.progress_end()
 
             if errors:
+                _log(f"[execute] 完成：成功 {uploaded}/{total}，{len(errors)} 个错误")
                 self.report({"WARNING"}, f"上传完成：成功 {uploaded}/{total}，{len(errors)} 个错误")
             else:
+                _log(f"[execute] 全部完成：共 {uploaded} 张图片")
                 self.report({"INFO"}, f"全部上传完成：共 {uploaded} 张图片")
             return {"FINISHED"}
         finally:
