@@ -248,16 +248,22 @@ def _cache_mesh_samples(
     obj: bpy.types.Object, depsgraph, num_samples: int,
 ) -> Optional[List[Vector]]:
     """预计算并缓存物体表面的世界坐标采样点。"""
-    mesh: bpy.types.Mesh | None = obj.data
-    if mesh is None:
-        return None
+    # 从 depsgraph 获取 evaluated object（确保矩阵和网格是最新的）
+    eval_obj = None
     try:
         eval_obj = depsgraph.objects.get(obj.name, None)
-        if eval_obj and eval_obj.data:
-            mesh = eval_obj.data
     except Exception:
         pass
-    samples = _sample_mesh_surface(mesh, obj, num_samples)
+    if eval_obj is None:
+        eval_obj = obj
+
+    mesh: bpy.types.Mesh | None = eval_obj.data
+    if mesh is None:
+        mesh = obj.data
+    if mesh is None or not hasattr(mesh, "vertices"):
+        return None
+    # 使用 evaluated object 的世界矩阵，确保变形/修改器生效
+    samples = _sample_mesh_surface(mesh, eval_obj, num_samples)
     return samples if samples else None
 
 
@@ -289,10 +295,13 @@ def _get_visible_objects(
     hidden_set: Optional[set[str]] = None,
     sample_cache: Optional[Dict[str, List[Vector]]] = None,
 ) -> tuple[set[str], list[tuple[str, bpy.types.Object]]]:
-    """三步过滤：视锥体 AABB 粗筛 → 顶点 NDC 精确检测 → 光线投射遮挡检测。
+    """三步过滤：场景物体迭代 → 视锥体 AABB 粗筛 → 顶点 NDC 精确检测 → 光线投射遮挡检测。
+
+    用 scene.objects 替代 context.visible_objects，配合 depsgraph
+    获取正确求值后的矩阵和网格数据。
 
     hidden_set: 当前被隐藏的物体名集合（用于枚举组合时模拟不同状态）
-    sample_cache: 预缓存的采样点 {obj_name: [world_pos, ...]}，避免重复计算
+    sample_cache: 预缓存的采样点 {obj_name: [world_pos, ...]}
     """
     scene = context.scene
     cam = scene.camera
@@ -304,11 +313,17 @@ def _get_visible_objects(
     ce = cam.data.clip_end
     from bpy_extras.object_utils import world_to_camera_view
 
-    # ---- 构建视锥体 6 个平面 ----
-    frame = cam.data.view_frame(scene=scene)
-    near_corners = [cam.matrix_world @ Vector((p.x, p.y, p.z)) for p in frame]
-    cam_pos = cam.matrix_world.translation
-    cam_dir = cam.matrix_world.to_quaternion() @ Vector((0, 0, -1))
+    # 从 depsgraph 获取求值后的相机
+    eval_cam = depsgraph.objects.get(cam.name, None)
+    if eval_cam is None:
+        eval_cam = cam
+
+    # ---- 构建视锥体 6 个平面（使用 eval 相机矩阵） ----
+    frame = eval_cam.data.view_frame(scene=scene)
+    eval_cam_matrix = eval_cam.matrix_world
+    near_corners = [eval_cam_matrix @ Vector((p.x, p.y, p.z)) for p in frame]
+    cam_pos = eval_cam_matrix.translation
+    cam_dir = eval_cam_matrix.to_quaternion() @ Vector((0, 0, -1))
 
     def _plane_from_three(a: Vector, b: Vector, c: Vector) -> tuple[Vector, float]:
         n = (b - a).cross(c - a).normalized()
@@ -346,54 +361,60 @@ def _get_visible_objects(
 
     MAX_VERTICES = 256
 
-    def _has_vertex_in_frustum(obj: bpy.types.Object) -> bool:
-        mesh: bpy.types.Mesh | None = obj.data
-        if mesh is None:
+    def _has_vertex_in_frustum(obj_eval: bpy.types.Object) -> bool:
+        """用 evaluated object 检测网格顶点是否在视锥体内。"""
+        mesh: bpy.types.Mesh | None = obj_eval.data
+        if mesh is None or not hasattr(mesh, "vertices"):
             return False
-        try:
-            eval_obj = depsgraph.objects.get(obj.name, None)
-            if eval_obj and eval_obj.data:
-                mesh = eval_obj.data
-        except Exception:
-            pass
         verts = mesh.vertices
         total = len(verts)
         if total == 0:
             return False
-        if total <= MAX_VERTICES:
-            step = 1
-        else:
-            step = max(1, total // MAX_VERTICES)
+        step = 1 if total <= MAX_VERTICES else max(1, total // MAX_VERTICES)
+        world_mat = obj_eval.matrix_world
         for i in range(0, total, step):
-            v = verts[i]
-            world_pos = obj.matrix_world @ v.co
-            ndc = world_to_camera_view(scene, cam, world_pos)
+            world_pos = world_mat @ verts[i].co
+            ndc = world_to_camera_view(scene, eval_cam, world_pos)
             if 0.0 <= ndc.x <= 1.0 and 0.0 <= ndc.y <= 1.0 and cs <= ndc.z <= ce:
                 return True
         return False
 
     # ---- 主循环 ----
     visible_types = {"MESH", "CURVE", "SURFACE", "META", "FONT", "GPENCIL", "ARMATURE", "LATTICE", "EMPTY"}
-    have_mesh = any(obj.type == "MESH" for obj in context.visible_objects)
 
-    all_names: set[str] = set()
-    removable_list: list[tuple[str, bpy.types.Object]] = []
-
-    for obj in context.visible_objects:
+    # 先收集所有可能物体，判断是否有 MESH 类型
+    all_candidates: list[bpy.types.Object] = []
+    have_mesh = False
+    for obj in scene.objects:
         try:
             if obj.type not in visible_types:
                 continue
             if obj.hide_get() or not obj.visible_get():
                 continue
-            # 如果传入了 hidden_set，模拟物体被隐藏
             if hidden_set and obj.name in hidden_set:
                 continue
+            if obj.type == "MESH":
+                have_mesh = True
+            all_candidates.append(obj)
+        except Exception:
+            continue
+
+    all_names: set[str] = set()
+    removable_list: list[tuple[str, bpy.types.Object]] = []
+
+    for obj in all_candidates:
+        try:
+            # 从 depsgraph 获取 evaluated object
+            obj_eval = depsgraph.objects.get(obj.name, None)
+            if obj_eval is None:
+                obj_eval = obj
 
             bbox_local = obj.bound_box
             if not bbox_local:
                 continue
 
-            corners_world = [obj.matrix_world @ Vector(p) for p in bbox_local]
+            world_mat = obj_eval.matrix_world if obj_eval else obj.matrix_world
+            corners_world = [world_mat @ Vector(p) for p in bbox_local]
             min_c = Vector((
                 min(p.x for p in corners_world),
                 min(p.y for p in corners_world),
@@ -407,10 +428,10 @@ def _get_visible_objects(
 
             if not _aabb_in_frustum(min_c, max_c):
                 continue
-            if not _has_vertex_in_frustum(obj):
+            if not _has_vertex_in_frustum(obj_eval):
                 continue
 
-            # 遮挡检测：用预缓存采样点，或实时计算
+            # 遮挡检测
             if have_mesh and obj.type == "MESH":
                 obj_samples = None
                 if sample_cache is not None:
