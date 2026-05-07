@@ -11,12 +11,10 @@ bl_info = {
     "tracker_url": "https://github.com/Zlh23/zlhNode/releases",
 }
 
-import base64
 import json
 import mathutils
 import os
 import random
-import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -53,39 +51,38 @@ def _http_json(method: str, url: str, body_obj: Optional[Dict[str, Any]], timeou
     return data
 
 
-def _post_render_output(api_base: str, raw_png: bytes, object_names: str) -> dict:
+def _post_render_output(api_base: str, filename: str, object_names: str) -> dict:
+    """POST 只传文件路径和物体名，不再传图片数据。"""
     url = api_base + "/bridge/render/output"
     body = {
-        "image_base64": base64.standard_b64encode(raw_png).decode("ascii"),
+        "filename": filename,
         "object_names": object_names,
     }
     return _http_json("POST", url, body)
 
 
-def _render_to_png_bytes(context) -> bytes:
+def _render_to_file(context, output_dir: str) -> str:
+    """渲染当前相机视图到 output_dir，返回文件名（不含路径）。"""
     scene = context.scene
     fp_orig = scene.render.filepath
     fmt_orig = scene.render.image_settings.file_format
     scene.render.image_settings.file_format = "PNG"
 
-    fd, tmp_path = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
+    os.makedirs(output_dir, exist_ok=True)
+    # 用 uuid 防止多线程/多实例冲突
+    import uuid
+    fname = uuid.uuid4().hex + ".png"
+    out_path = os.path.join(output_dir, fname)
     try:
-        scene.render.filepath = tmp_path
+        scene.render.filepath = out_path
         bpy.ops.render.render(write_still=True)
     finally:
         scene.render.filepath = fp_orig
         scene.render.image_settings.file_format = fmt_orig
 
-    try:
-        with open(tmp_path, "rb") as f:
-            raw = f.read()
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-    return raw
+    if not os.path.isfile(out_path):
+        raise RuntimeError(f"渲染失败，未生成文件: {out_path}")
+    return fname
 
 
 class ZLH_AddonPreferences(AddonPreferences):
@@ -97,9 +94,18 @@ class ZLH_AddonPreferences(AddonPreferences):
         default="http://127.0.0.1:8188",
     )
 
+    output_dir: StringProperty(
+        name="输出目录",
+        description="WSL 共享目录路径（Windows 侧），渲染的 PNG 直接保存到这里。"
+                    "例如 \\\\wsl.localhost\\Ubuntu\\home\\zlh-linux\\ComfyUI\\custom_nodes\\zlhNode\\temp\\blender_render",
+        default=r"\\wsl.localhost\Ubuntu\home\zlh-linux\ComfyUI\custom_nodes\zlhNode\temp\blender_render",
+        subtype="DIR_PATH",
+    )
+
     def draw(self, _context):
         layout = self.layout
         layout.prop(self, "api_base")
+        layout.prop(self, "output_dir")
         box = layout.box()
         box.label(text="快捷键：编辑 → 偏好设置 → 键位映射 → 搜索「zlh」", icon="INFO")
         box.label(text="Ctrl+Shift+B：渲染并上传（outfit 为可见物体名）")
@@ -317,7 +323,8 @@ def _get_visible_objects(context) -> tuple[set[str], list[tuple[str, bpy.types.O
     return all_names, removable_list
 
 
-def _render_and_upload(context, base: str, visible_names: set[str],
+def _render_and_upload(context, base: str, output_dir: str,
+                        visible_names: set[str],
                         affected: set[str], orig_hide: dict[str, bool]) -> None:
     """修改 affected 中物体的 hide_render，渲染并上传，然后恢复。"""
     try:
@@ -327,14 +334,14 @@ def _render_and_upload(context, base: str, visible_names: set[str],
                 continue
             obj.hide_render = name not in visible_names
 
-        raw = _render_to_png_bytes(context)
+        fname = _render_to_file(context, output_dir)
 
         names_str = ",".join(sorted(visible_names))
-        data = _post_render_output(base, raw, names_str)
+        data = _post_render_output(base, fname, names_str)
 
         if not data.get("ok"):
             raise RuntimeError(f"服务器返回错误: {data.get('error', 'unknown')}")
-        print(f"[zlh] 已上传 outfit={names_str}")
+        print(f"[zlh] 已上传 outfit={names_str} file={fname}")
     finally:
         for name in affected:
             obj = context.scene.objects.get(name)
@@ -437,6 +444,12 @@ class ZLH_OT_RenderUpload(Operator):
             ZLH_OT_RenderUpload._render_lock.release()
             return {"CANCELLED"}
 
+        output_dir = _prefs(context).output_dir.strip()
+        if not output_dir:
+            self.report({"ERROR"}, "请先在偏好设置中配置输出目录（指向 WSL 共享目录）")
+            ZLH_OT_RenderUpload._render_lock.release()
+            return {"CANCELLED"}
+
         try:
             # 1. 获取视锥体内可见物体
             all_visible, removable_list = _get_visible_objects(context)
@@ -446,8 +459,8 @@ class ZLH_OT_RenderUpload(Operator):
                 # 空场景：直接渲染一张空图
                 self.report({"WARNING"}, "相机视锥体内没有可见物体，仍将渲染空场景")
                 try:
-                    raw = _render_to_png_bytes(context)
-                    data = _post_render_output(base, raw, "")
+                    fname = _render_to_file(context, output_dir)
+                    data = _post_render_output(base, fname, "")
                 except Exception as e:
                     self.report({"ERROR"}, str(e))
                     return {"CANCELLED"}
@@ -458,9 +471,9 @@ class ZLH_OT_RenderUpload(Operator):
                 # 没有 removable：渲染一张全图
                 self.report({"INFO"}, "无 removable 物体，仅渲染一张全图")
                 try:
-                    raw = _render_to_png_bytes(context)
+                    fname = _render_to_file(context, output_dir)
                     names = ",".join(sorted(all_visible))
-                    data = _post_render_output(base, raw, names)
+                    data = _post_render_output(base, fname, names)
                 except urllib.error.HTTPError as e:
                     err = ""
                     try:
@@ -519,7 +532,7 @@ class ZLH_OT_RenderUpload(Operator):
                 self.report({"INFO"}, f"渲染中… {idx + 1}/{total}")
 
                 try:
-                    _render_and_upload(context, base, subset, affected, orig_hide)
+                    _render_and_upload(context, base, output_dir, subset, affected, orig_hide)
                     uploaded += 1
                 except urllib.error.HTTPError as e:
                     err_text = ""

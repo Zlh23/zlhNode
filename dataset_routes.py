@@ -76,6 +76,14 @@ def _stash_dir() -> str:
     return p
 
 
+def _blender_render_dir() -> str:
+    """Blender 渲染输出的共享目录（WSL 侧路径），
+    Windows Blender 通过 \\\\wsl.localhost\\Ubuntu\\... 映射到此目录。"""
+    p = os.path.join(_package_dir(), "temp", "blender_render")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
 def _stash_manifest_path() -> str:
     return os.path.join(_stash_dir(), "manifest.json")
 
@@ -115,7 +123,6 @@ def _normalize_image_entry(entry: Any) -> dict[str, Any]:
     out = _default_image_entry()
     fid = entry.get("fid")
     if isinstance(fid, str) and _valid_file_id(fid):
-        out["fid"] = fid
         if os.path.isfile(_pool_file_path(fid)):
             out["fid"] = fid
         else:
@@ -287,16 +294,16 @@ def _shorter_outfit(a: str, b: str) -> str:
 
 
 def _save_image_entry(b64: str, outfit: str, scene: str) -> tuple[str | None, dict[str, Any]]:
-    """统一处理：校验 base64 → 转 PNG → phash 去重 → 存文件 → 写入 state → 返回 (fid, images)。
-
-    如果新图 phash 与已有图片高度相似，不新保存文件，而是复用已有 fid，
-    并且 outfit 取两者中较短的那个。
-    """
+    """统一处理：校验 base64 → 转 PNG → phash 去重 → 存文件 → 写入 state → 返回 (fid, images)。"""
     try:
         png = _b64_to_png_bytes(b64)
     except Exception as e:
         raise ValueError(f"image_decode_failed: {e}") from e
+    return _save_image_entry_from_png(png, outfit, scene)
 
+
+def _save_image_entry_from_png(png: bytes, outfit: str, scene: str) -> tuple[str | None, dict[str, Any]]:
+    """与 _save_image_entry 相同，但直接接受已解码的 PNG bytes。"""
     new_hash = _phash_from_png(png)
 
     st = load_state()
@@ -486,7 +493,8 @@ def register() -> None:
         if not os.path.isfile(path):
             return web.Response(status=404)
         try:
-            data = open(path, "rb").read()
+            with open(path, "rb") as f:
+                data = f.read()
         except OSError as e:
             return _json({"error": str(e)}, status=500)
         r = web.Response(body=data, content_type="image/png")
@@ -525,21 +533,43 @@ def register() -> None:
         except json.JSONDecodeError:
             return _json({"error": "invalid JSON"}, status=400)
 
-        b64 = body.get("image_base64")
-        if not isinstance(b64, str) or not b64.strip():
-            return _json({"error": "image_base64 required"}, status=400)
+        filename = body.get("filename")
+        if not isinstance(filename, str) or not filename.strip():
+            return _json({"error": "filename required"}, status=400)
+        # 安全校验：只允许 .png 文件，防止路径穿越
+        if not filename.endswith(".png") or "/" in filename or "\\" in filename:
+            return _json({"error": "invalid filename"}, status=400)
         outfit = body.get("object_names", "")
         if not isinstance(outfit, str):
             outfit = ""
 
+        # 从共享目录读取 Blender 渲染好的 PNG
+        src_path = os.path.join(_blender_render_dir(), filename)
+        if not os.path.isfile(src_path):
+            return _json({"error": f"file not found: {filename}"}, status=404)
         try:
-            fid, images = _save_image_entry(b64, outfit, "")
+            with open(src_path, "rb") as f:
+                png = f.read()
+        except OSError as e:
+            return _json({"error": f"read failed: {e}"}, status=500)
+
+        if not png:
+            return _json({"error": "empty file"}, status=400)
+
+        try:
+            fid, images = _save_image_entry_from_png(png, outfit, "")
         except ValueError as e:
             return _json({"error": str(e)}, status=400)
         except RuntimeError as e:
             return _json({"error": str(e)}, status=500)
         except Exception as e:
             return _json({"error": f"unexpected: {e}"}, status=500)
+        finally:
+            # 无论成功失败，删除已处理的临时文件
+            try:
+                os.remove(src_path)
+            except OSError:
+                pass
 
         return _json({"ok": True, "id": fid, "images": images})
 
@@ -744,7 +774,8 @@ def register() -> None:
         if not os.path.isfile(path):
             return web.Response(status=404)
         try:
-            data = open(path, "rb").read()
+            with open(path, "rb") as f:
+                data = f.read()
         except OSError as e:
             return _json({"error": str(e)}, status=500)
         r = web.Response(body=data, content_type="image/png")

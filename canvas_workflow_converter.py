@@ -65,7 +65,7 @@ class WorkflowConverter:
         return False
 
     @staticmethod
-    def expand_subgraph(subgraph_node_id: int, subgraph_def: Dict[str, Any], workflow_links: List) -> Tuple[List[Dict], List]:
+    def expand_subgraph(subgraph_node_id: int, subgraph_def: Dict[str, Any], workflow_links: List) -> Tuple[List[Dict], List, Dict, Dict]:
         """
         Expand a subgraph into individual nodes.
 
@@ -640,7 +640,7 @@ class WorkflowConverter:
             return (source_node_id, source_slot)
         
         # Helper function to trace through bypassed nodes
-        def trace_through_bypassed(source_node_id, source_slot, visited=None):
+        def trace_through_bypassed(source_node_id_in, source_slot, visited=None):
             """
             Trace through bypassed nodes to find the actual source.
             Returns (actual_source_id, actual_source_slot) tuple.
@@ -648,6 +648,8 @@ class WorkflowConverter:
             Now handles ALL input types (widgets, strings, etc), not just image/latent.
             This fixes kjnodes (WidgetToString) and other widget-based bypassed nodes.
             """
+            # 统一转为 str，bypassed_nodes 是以 str 存储的
+            source_node_id = str(source_node_id_in) if not isinstance(source_node_id_in, str) else source_node_id_in
             if visited is None:
                 visited = set()
             
@@ -1152,8 +1154,8 @@ class WorkflowConverter:
         
         widget_values = node.get('widgets_values', [])
         if isinstance(widget_values, dict):
-            # Dict format - keys are widget names
-            widget_values = []  # Can't use for index-based sub-input lookup
+            # Dict format - keys are widget names, can't use for index-based sub-input lookup
+            widget_values = []
         
         # Try to get from cached node info first
         node_info = get_node_info_for_type(node_type)

@@ -127,7 +127,10 @@ def register() -> None:
 
     @server.routes.post("/bridge/input")
     async def bridge_post_input(request: web.Request) -> web.Response:
-        body = await request.json()
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return _json({"error": "invalid JSON"}, status=400)
         key = str(body.get("session_key", "default"))
         payload = body.get("payload")
         if payload is None or isinstance(payload, str):
