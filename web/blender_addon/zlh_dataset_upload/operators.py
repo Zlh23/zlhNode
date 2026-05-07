@@ -181,15 +181,16 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
             count = 1
 
         box = layout.box()
-        box.label(text=f"即将渲染 {count} 张，可能出现的 tag:", icon="INFO")
+        box.label(text=f"即将渲染 {count} 张，各 tag 出现频次:", icon="INFO")
 
-        all_tags: list[str] = []
+        # 统计每种 tag 在多少种有效组合中出现
+        from collections import Counter
+        tag_counter: Counter[str] = Counter()
         for _mask, vis_names in effective:
             tag = ",".join(sorted(vis_names))
-            all_tags.append(tag)
-        unique_tags = sorted(set(all_tags))
-        for tag in unique_tags:
-            box.label(text=f"  {tag}")
+            tag_counter[tag] += 1
+        for tag, freq in tag_counter.most_common():
+            box.label(text=f"  {tag} — {freq} 种")
 
         box.label(text="确认后将开始渲染，是否继续？", icon="QUESTION")
 
