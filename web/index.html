@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>zlh · 训练集</title>
+    <meta name="theme-color" content="#0a0b10" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="theme-minimal">
+    <main class="dataset-shell">
+      <header class="top-strip">
+        <div class="toolbar-cluster toolbar-cluster--api">
+          <span class="toolbar-cluster-label">API</span>
+          <input
+            id="apiBase"
+            type="text"
+            class="inp-url"
+            autocomplete="off"
+            placeholder="默认同源；可填 http://127.0.0.1:8188"
+            aria-label="Comfy API 根地址"
+          />
+        </div>
+        <nav class="toolbar-cluster toolbar-cluster--compact" aria-label="数据集操作">
+          <button type="button" id="btnExport" class="btn-solid btn-solid--text">导出</button>
+          <button type="button" id="btnClear" class="btn-ghost btn-ghost--risk btn-ghost--text">清空</button>
+        </nav>
+        <div class="toolbar-cluster toolbar-cluster--import">
+          <input type="file" id="fileInput" hidden accept="image/*" multiple />
+          <button type="button" id="btnPickLocal" class="btn-inline btn-inline--accent">导入图片</button>
+        </div>
+      </header>
+      <div id="toolbarStatus" class="toast-line" aria-live="polite"></div>
+      <div id="jobProgress" class="job-progress hidden" aria-hidden="true">
+        <div class="job-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="jobProgressFill" class="job-progress-fill"></div>
+        </div>
+      </div>
+      <div id="homeGrid" class="dataset-home-grid"></div>
+    </main>
+
+    <!-- 编辑面板 -->
+    <div
+      id="imageEditBackdrop"
+      class="modal-backdrop image-edit-backdrop hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-label="编辑图片"
+    >
+      <div class="image-edit-panel" id="imageEditPanel">
+        <div class="image-edit-head">
+          <span class="image-edit-title">编辑图片</span>
+          <button type="button" id="imageEditClose" class="image-edit-close">关闭</button>
+        </div>
+        <div class="image-edit-body">
+          <div class="image-edit-preview-area">
+            <img id="imageEditImg" class="image-edit-img hidden" alt="" />
+            <p id="imageEditEmpty" class="image-edit-empty hidden">请选择一张图片</p>
+          </div>
+          <div class="image-edit-form">
+            <label class="image-edit-label">
+              <span class="image-edit-label-text">outfit</span>
+              <input id="imageEditOutfit" type="text" class="image-edit-input" spellcheck="false" />
+            </label>
+            <label class="image-edit-label">
+              <span class="image-edit-label-text">scene</span>
+              <textarea id="imageEditScene" class="image-edit-textarea" rows="3" spellcheck="false"></textarea>
+            </label>
+          </div>
+        </div>
+        <div class="image-edit-actions">
+          <button type="button" id="imageEditDelete" class="btn-ghost btn-ghost--risk btn-ghost--text">删除</button>
+          <button type="button" id="imageEditSave" class="btn-solid btn-solid--text">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <script defer src="shared.js"></script>
+    <script defer src="app.js"></script>
+  </body>
+</html>

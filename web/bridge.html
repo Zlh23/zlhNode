@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Web Bridge 跑图 · zlhNode</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="wrap wrap--narrow">
+      <header>
+        <p class="muted" style="margin: 0 0 8px"><a href="index.html">← LoRA 训练集主页</a></p>
+        <h1>ComfyUI Web Bridge</h1>
+        <p class="muted">独立跑图页；导入图集请在主页点开格子，用 ◇ 从当前工作流出图并勾选写入该格。</p>
+      </header>
+
+      <section class="slot-section">
+        <div id="slotGrid" class="slot-grid" aria-label="图片展示格"></div>
+      </section>
+    </main>
+
+    <div id="modalBackdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+      <div class="modal-panel modal-panel--wide" id="modalPanel">
+        <div class="modal-head">
+          <h2 id="modalTitle">格子</h2>
+          <button type="button" id="modalClose" class="modal-close" aria-label="关闭">×</button>
+        </div>
+
+        <label class="field full">
+          <span>API 根地址</span>
+          <input id="modalBaseUrl" type="text" placeholder="http://127.0.0.1:8188" />
+          <small class="muted">同源扩展页可留空，将使用当前站点来源。</small>
+        </label>
+
+        <label class="field full">
+          <span>工作流（文件名不含 .json）</span>
+          <div class="row">
+            <select id="modalWorkflowSelect"></select>
+            <button type="button" id="modalBtnRefresh">刷新列表</button>
+          </div>
+          <small class="muted">仅列出含 <strong>Web Bridge Input / Output</strong> 的工作流（<code>user/default/workflows/</code>）。</small>
+        </label>
+
+        <label class="field full">
+          <span>输入文本（传给 Web Bridge Input，纯字符串）</span>
+          <textarea id="modalPayload" rows="8" spellcheck="false" placeholder="例如：提示词"></textarea>
+        </label>
+
+        <div class="actions">
+          <button type="button" id="modalBtnRun" class="primary">运行</button>
+          <span id="modalStatus" class="muted"></span>
+        </div>
+
+        <div class="field full modal-output-block">
+          <span>输出图片（点击一张设为该格主图）</span>
+          <div id="modalThumbs" class="modal-thumbs"></div>
+          <p id="modalNoImages" class="muted hidden">尚无输出图，请先点击「运行」。</p>
+        </div>
+      </div>
+    </div>
+
+    <script src="shared.js"></script>
+    <script src="bridge-app.js"></script>
+  </body>
+</html>

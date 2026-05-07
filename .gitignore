@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.DS_Store
+output/datasets/
+temp/
+node_modules/
+.env
+*.zip
+*.bat
+*.ps1
