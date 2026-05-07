@@ -1,1 +1,43 @@
-���
+name: Build and Release Blender Addon
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Blender Addon ZIP
+        run: |
+          mkdir -p release
+          cd web/blender_addon
+          zip -r ../../release/zlh_dataset_upload.zip zlh_dataset_upload/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "v1.0.${{ github.run_number }}"
+          body: |
+            ## zlhNode Blender Addon Release v1.0.${{ github.run_number }}
+
+            ### 自动构建
+            此发布由 GitHub Actions 自动打包生成。
+
+            ### 安装方式
+            下载 `zlh_dataset_upload.zip` 后在 Blender 中安装：
+            1. 打开 Blender → 编辑 → 偏好设置 → 插件
+            2. 点击"安装..."选择下载的 zip 文件
+            3. 搜索 "zlh" 并勾选启用
+
+          files: release/zlh_dataset_upload.zip
+          draft: false
+          prerelease: false
