@@ -560,7 +560,7 @@ class ZLH_OT_CheckUpdate(Operator):
         import urllib.request
         try:
             req = urllib.request.Request(
-                "https://api.github.com/repos/zlhNode/zlhNode/releases/latest",
+                "https://api.github.com/repos/Zlh23/zlhNode/releases/latest",
                 headers={"Accept": "application/json", "User-Agent": "zlh-blender-addon"},
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
