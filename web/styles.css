@@ -309,11 +309,11 @@ body.theme-minimal {
 }
 
 .theme-minimal .image-row-outfit {
-  flex: 0 0 180px;
+  flex: 0 0 200px;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  justify-content: flex-start;
+  justify-content: center;
   padding: 12px 14px;
   background: var(--zlh-surface);
   border: 1px solid var(--zlh-border);
@@ -332,6 +332,7 @@ body.theme-minimal {
 .theme-minimal .image-row-outfit-input {
   width: 100%;
   box-sizing: border-box;
+  flex: 1;
   padding: 8px 10px;
   border: 1px solid transparent;
   border-radius: 4px;
@@ -339,7 +340,7 @@ body.theme-minimal {
   color: rgba(255, 255, 255, 0.82);
   font-size: 0.875rem;
   resize: none;
-  min-height: 40px;
+  min-height: 60px;
   transition: border-color 0.15s, background 0.15s;
 }
 
