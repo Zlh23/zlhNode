@@ -12,7 +12,7 @@ def _log(msg: str):
 bl_info = {
     "name": "zlh 数据集渲染上传",
     "author": "zlhNode",
-    "version": (1, 13, 0),
+    "version": (1, 13, 1),
     "blender": (5, 1, 0),
     "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O）",
     "description": "渲染当前相机、修改物体名称（自动过滤视锥体内物体）、分配到网页格子",
@@ -125,7 +125,7 @@ class ZLH_AddonPreferences(AddonPreferences):
         box.separator()
         row = box.row()
         row.operator("zlh.check_update", text="检查更新", icon="URL")
-        row.label(text="当前版本: 1.13.0")
+        row.label(text="当前版本: 1.13.1")
 
 
 def _register_object_removable():
@@ -288,7 +288,7 @@ def _is_occluded(
             _log(f"[_is_occluded] {obj.name} 采样点 {idx} 与相机重合，跳过")
             continue
         direction.normalize()
-        result, _hit_pos, _hit_normal, hit_obj, _, _ = scene.ray_cast(
+        result, _hit_pos, _hit_normal, _hit_index, hit_obj, _ = scene.ray_cast(
             depsgraph, cam_pos, direction, distance=dist,
         )
         if result and hit_obj != obj:
