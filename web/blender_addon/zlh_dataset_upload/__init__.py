@@ -748,15 +748,16 @@ class ZLH_OT_RenderUpload(Operator):
             count = 1
 
         box = layout.box()
-        box.label(text=f"即将渲染 {count} 张，有效组合预览:", icon="INFO")
-        for idx, (mask, vis_names) in enumerate(effective):
-            parts = []
-            for i, rname in enumerate(removable_names):
-                shown = (mask >> i) & 1
-                parts.append(f"✅{rname}" if shown else f"❌{rname}")
+        box.label(text=f"即将渲染 {count} 张，可能出现的 tag:", icon="INFO")
+
+        # 收集所有组合中的 tag（去重后显示）
+        all_tags: list[str] = []
+        for _mask, vis_names in effective:
             tag = ",".join(sorted(vis_names))
-            box.label(text=f"  #{idx+1}: {' | '.join(parts)}")
-            box.label(text=f"         tag: {tag}")
+            all_tags.append(tag)
+        unique_tags = sorted(set(all_tags))
+        for tag in unique_tags:
+            box.label(text=f"  {tag}")
 
         box.label(text="确认后将开始渲染，是否继续？", icon="QUESTION")
 

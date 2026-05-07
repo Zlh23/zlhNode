@@ -537,8 +537,8 @@ def register() -> None:
         if not isinstance(images, list):
             images = []
 
-        # 按 outfit 分组导出
-        groups: dict[str, list[dict[str, Any]]] = {}
+        # 收集所有有效图片
+        entries: list[dict[str, Any]] = []
         for entry in images:
             e = _normalize_image_entry(entry)
             if not e["fid"]:
@@ -546,10 +546,9 @@ def register() -> None:
             src = _pool_file_path(e["fid"])
             if not os.path.isfile(src):
                 continue
-            outfit = e["outfit"] or "unknown"
-            groups.setdefault(outfit, []).append(e)
+            entries.append(e)
 
-        total = sum(len(items) for items in groups.values())
+        total = len(entries)
         if total == 0:
             rel0 = os.path.relpath(datasets_root(), _package_dir()).replace("\\", "/")
             await _write_ndjson_line(resp, {"type": "done", "ok": True, "saved": [], "package_relative": rel0})
@@ -559,33 +558,29 @@ def register() -> None:
         await _write_ndjson_line(resp, {"type": "progress", "phase": "export", "current": 0, "total": total})
         saved: list[dict[str, Any]] = []
         exported = 0
-        for outfit, items in groups.items():
-            # 每个 outfit 一个子文件夹
-            folder_name = outfit.replace("/", "_").replace("\\", "_")
-            sub = os.path.join(datasets_root(), folder_name)
-            os.makedirs(sub, exist_ok=True)
-            for idx, entry in enumerate(items, 1):
-                src = _pool_file_path(entry["fid"])
-                png_path = os.path.join(sub, f"{idx}.png")
-                txt_path = os.path.join(sub, f"{idx}.txt")
-                try:
-                    shutil.copy2(src, png_path)
-                    scene = entry.get("scene", "")
-                    txt_body = f"{outfit}, {scene}" if scene else outfit
-                    with open(txt_path, "w", encoding="utf-8") as f:
-                        f.write(txt_body)
-                except OSError as e:
-                    await _write_ndjson_line(
-                        resp,
-                        {"type": "done", "ok": False, "error": "write_failed", "message": str(e), "path": sub},
-                    )
-                    await resp.write_eof()
-                    return resp
-                saved.append({"folder": folder_name, "index": idx})
-                exported += 1
+        for idx, entry in enumerate(entries, 1):
+            src = _pool_file_path(entry["fid"])
+            png_path = os.path.join(datasets_root(), f"{idx}.png")
+            txt_path = os.path.join(datasets_root(), f"{idx}.txt")
+            try:
+                shutil.copy2(src, png_path)
+                outfit = entry["outfit"]
+                scene = entry.get("scene", "")
+                txt_body = f"{outfit}, {scene}" if scene else outfit
+                with open(txt_path, "w", encoding="utf-8") as f:
+                    f.write(txt_body)
+            except OSError as e:
                 await _write_ndjson_line(
-                    resp, {"type": "progress", "phase": "export", "current": exported, "total": total}
+                    resp,
+                    {"type": "done", "ok": False, "error": "write_failed", "message": str(e), "path": datasets_root()},
                 )
+                await resp.write_eof()
+                return resp
+            saved.append({"index": idx})
+            exported += 1
+            await _write_ndjson_line(
+                resp, {"type": "progress", "phase": "export", "current": exported, "total": total}
+            )
 
         rel = os.path.relpath(datasets_root(), _package_dir())
         await _write_ndjson_line(
