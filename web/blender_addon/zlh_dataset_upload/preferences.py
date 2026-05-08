@@ -38,7 +38,7 @@ class ZLH_AddonPreferences(AddonPreferences):
         box.label(text="  - 弹窗选择随机张数，每张随机决定 removable 可见性")
         box.label(text="Ctrl+Shift+O：选中相机时设为球形随机相机；选中物体时修改名称/removable", icon="OBJECT_DATA")
         box.label(text="  - 球形相机：在球面上随机移动，始终对准球心", icon="SPHERE")
-        box.label(text="Ctrl+Shift+Q：球形相机随机位置（需先用 Ctrl+Shift+O 激活）", icon="VIEW_PAN")
+        box.label(text="Ctrl+Shift+Q：球形相机随机位置（需先用 Ctrl+Shift+O 激活）", icon="CAMERA_DATA")
         box.label(text="若快捷键冲突，请手动在上述键位映射中改为其它按键", icon="ERROR")
         box.separator()
         row = box.row()

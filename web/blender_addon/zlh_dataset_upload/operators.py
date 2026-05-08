@@ -67,7 +67,7 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
             row.prop(cam, "zlh_sphere_camera", text="设为球形随机相机")
             if cam.zlh_sphere_camera:
                 box = layout.box()
-                box.label(text="请选择一个物体作为锚点（球心）：", icon="SHADING_SPHERE")
+                box.label(text="请选择一个物体作为锚点（球心）：", icon="SPHERE")
                 box.template_ID(scene, "zlh_sphere_anchor", open="text.open")
                 if scene.zlh_sphere_anchor:
                     anchor = scene.zlh_sphere_anchor
@@ -75,7 +75,7 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
                     box.label(text=f"锚点: {anchor.name}")
                     box.label(text=f"半径: {radius:.3f}")
                 box.label(text="确认后显示球面辅助线", icon="INFO")
-                box.label(text="Ctrl+Shift+Q 随机移动并始终对准锚点", icon="VIEW_PAN")
+                box.label(text="Ctrl+Shift+Q 随机移动并始终对准锚点", icon="CAMERA_DATA")
             return
 
         # 普通物体模式
@@ -95,14 +95,19 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
 
         # 相机球形模式
         if getattr(self, "_is_camera", False) and len(obs) == 1 and obs[0].type == "CAMERA":
+            cam = obs[0]
             from .sphere_camera import _update_sphere_visualization
-            _update_sphere_visualization(scene)
-            if obs[0].zlh_sphere_camera:
-                self.report({"INFO"}, f"{obs[0].name} 已设为球形随机相机（Ctrl+Shift+Q 随机移动）")
+            if cam.zlh_sphere_camera:
+                # 检查是否已选锚点
+                if scene.zlh_sphere_anchor is None:
+                    self.report({"ERROR"}, "请先选择一个锚点物体作为球心")
+                    return {"CANCELLED"}
+                _update_sphere_visualization(scene)
+                self.report({"INFO"}, f"{cam.name} 已设为球形随机相机（锚点: {scene.zlh_sphere_anchor.name}，Ctrl+Shift+Q 随机移动）")
             else:
                 from .sphere_camera import _remove_sphere_visualization
                 _remove_sphere_visualization(scene)
-                self.report({"INFO"}, f"{obs[0].name} 已取消球形随机相机")
+                self.report({"INFO"}, f"{cam.name} 已取消球形随机相机")
             return {"FINISHED"}
 
         # 普通改名
@@ -216,7 +221,7 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
         layout.prop(self, "random_count")
         box = layout.box()
         box.label(text="流程：随机选择可见子集 → 渲染 →", icon="RENDER_STILL")
-        box.label(text="      IndexOB 检测实际出现的物体 → 上传", icon="FILE_TICK")
+        box.label(text="      IndexOB 检测实际出现的物体 → 上传", icon="CHECKBOX_HLT")
         box.label(text="确认后将开始渲染，是否继续？", icon="QUESTION")
 
     def execute(self, context):
