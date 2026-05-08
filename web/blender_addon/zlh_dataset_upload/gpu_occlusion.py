@@ -4,15 +4,14 @@
   渲染 n+1 张深度图代替 2^n 次 IndexOB 渲染：
   - 1 张仅 non-removable 的基准深度图
   - n 张各 removable 单独深度图（仅该物体可见）
-  然后通过 numpy 比较深度值推断各组合的实际可见物体：
-  - 从基准深度开始，逐个叠加 removable
-  - 如果该物体的深度图在某像素上比当前画布浅，则它可见
+  然后通过 numpy 比较深度值推断各组合的实际可见物体。
 
 用法：Blender 中按 Ctrl+Shift+Q 触发
 """
 
 import os
 import tempfile
+import traceback
 from typing import Dict, List, Optional, Set, Tuple
 
 import bpy
@@ -20,13 +19,8 @@ import numpy as np
 
 from . import _log
 
-# ── 渲染参数 ──────────────────────────────────────────────
 RENDER_RESOLUTION_PERCENT = 100
 
-
-# ════════════════════════════════════════════════════════════
-# 状态保存/恢复
-# ════════════════════════════════════════════════════════════
 
 def _save_render_state(scene) -> dict:
     render = scene.render
@@ -48,39 +42,35 @@ def _restore_render_state(scene, state: dict):
     render.use_compositing = state["use_compositing"]
 
 
-# ════════════════════════════════════════════════════════════
-# Blender 5.x Compositor 节点树管理
-# ════════════════════════════════════════════════════════════
-
-def _create_compositor_node_tree(scene) -> bpy.types.NodeTree:
-    """为场景创建并分配一个 Compositor 节点树。"""
+def _create_compositor_node_tree(scene):
     _log(f"[gpu_occlusion] 创建 Compositor 节点树 (scene={scene.name})")
     tree = bpy.data.node_groups.new(
         name=f"CompositorNodeTree_{scene.name}",
         type="CompositorNodeTree",
     )
     scene.compositing_node_group = tree
-    tree.interface.new_socket(
-        name="Image", in_out="OUTPUT", socket_type="NodeSocketColor",
-    )
+    tree.interface.new_socket(name="Image", in_out="OUTPUT", socket_type="NodeSocketColor")
     scene.render.use_compositing = True
     _log(f"[gpu_occlusion] Compositor 节点树创建完成")
     return tree
 
 
 def _reset_compositor_for_depth(scene):
-    """设置 Compositor：RLayers.Z → Viewer（用于读取深度图）。"""
+    _log(f"[gpu_occlusion] 设置 Compositor: RLayers.Z -> Viewer")
     tree = scene.compositing_node_group
     if tree is None:
+        _log(f"[gpu_occlusion] compositing_node_group 为 None，需要创建")
         tree = _create_compositor_node_tree(scene)
     else:
         scene.render.use_compositing = True
 
+    _log(f"[gpu_occlusion] 清除旧节点，当前 nodes 数量: {len(tree.nodes)}")
     for n in list(tree.nodes):
         tree.nodes.remove(n)
 
     rl = tree.nodes.new(type="CompositorNodeRLayers")
     rl.location = (0, 0)
+    _log(f"[gpu_occlusion] 创建 RenderLayers 节点完成")
 
     viewer = tree.nodes.new(type="CompositorNodeViewer")
     viewer.location = (300, 0)
@@ -89,73 +79,89 @@ def _reset_compositor_for_depth(scene):
     output = tree.nodes.new(type="NodeGroupOutput")
     output.location = (600, 0)
 
-    # 连 Image 到 GroupOutput（Compositor 必须有输出）
     try:
         tree.links.new(rl.outputs["Image"], output.inputs["Image"])
-    except Exception:
-        pass
+        _log(f"[gpu_occlusion] Image -> GroupOutput 连接成功")
+    except Exception as e:
+        _log(f"[gpu_occlusion] Image -> GroupOutput 连接失败: {e}")
 
-    # 连 Z 到 Viewer（深度图数据通过 Viewer Node 读取）
+    z_connected = False
     try:
         tree.links.new(rl.outputs["Z"], viewer.inputs[0])
+        z_connected = True
+        _log(f"[gpu_occlusion] Z -> Viewer 连接成功")
     except KeyError:
+        _log(f"[gpu_occlusion] 未找到 Z 输出，尝试查找 Depth")
         for out in rl.outputs:
             if out.name == "Depth" or "depth" in out.name.lower():
                 tree.links.new(out, viewer.inputs[0])
+                z_connected = True
+                _log(f"[gpu_occlusion] {out.name} -> Viewer 连接成功")
                 break
 
+    if not z_connected:
+        _log(f"[gpu_occlusion] 警告: 未找到深度输出！可用 outputs: {[o.name for o in rl.outputs]}")
+
     tree.update_tag()
+    _log(f"[gpu_occlusion] Compositor 设置完成")
 
 
-# ════════════════════════════════════════════════════════════
-# 渲染并读取深度图
-# ════════════════════════════════════════════════════════════
-
-def _render_depth_to_file(scene, filepath: str) -> bool:
-    """渲染深度图到文件。"""
+def _render_depth_to_file(scene, filepath: str, label: str = "") -> bool:
+    _log(f"[gpu_occlusion] 渲染深度图 {label}: {filepath}")
     fp_orig = scene.render.filepath
     fmt_orig = scene.render.image_settings.file_format
     scene.render.image_settings.file_format = "PNG"
     try:
         scene.render.filepath = filepath
+        _log(f"[gpu_occlusion]  调用 bpy.ops.render.render(write_still=True)")
         bpy.ops.render.render(write_still=True)
-        return os.path.isfile(filepath)
+        result = os.path.isfile(filepath)
+        _log(f"[gpu_occlusion]  渲染完成，文件存在={result}")
+        return result
     except Exception as e:
-        _log(f"  渲染深度图异常: {e}")
+        _log(f"[gpu_occlusion]  渲染异常 {label}: {e}")
+        _log(f"[gpu_occlusion]  traceback: {traceback.format_exc()}")
         return False
     finally:
         scene.render.filepath = fp_orig
         scene.render.image_settings.file_format = fmt_orig
 
 
-def _read_depth_from_file(filepath: str) -> Optional[np.ndarray]:
-    """从 PNG 文件读取 Z 通道数据，返回 (H, W) float32 数组。
-
-    Eevee 渲染深度图时 Viewer Node 将 Z 值映射到 [0,1] 范围，
-    读取后需要还原为实际深度（近裁面=0, 远裁面=1 mapped）。
-    """
+def _read_depth_from_file(filepath: str, label: str = "") -> Optional[np.ndarray]:
+    _log(f"[gpu_occlusion] 读取深度图 {label}: {filepath}")
     if not os.path.isfile(filepath):
+        _log(f"[gpu_occlusion]  文件不存在: {filepath}")
         return None
+
     try:
+        _log(f"[gpu_occlusion]  调用 bpy.data.images.load")
         img = bpy.data.images.load(filepath)
     except Exception as e:
-        _log(f"  加载深度图异常: {e}")
+        _log(f"[gpu_occlusion]  加载深度图异常 {label}: {e}")
+        _log(f"[gpu_occlusion]  traceback: {traceback.format_exc()}")
         return None
 
     w, h = img.size
-    pix = np.array(img.pixels[:], dtype=np.float32).reshape(h, w, 4)
+    _log(f"[gpu_occlusion]  图片尺寸: {w}x{h}")
 
-    # 释放 Blender image datablock
+    try:
+        pix = np.array(img.pixels[:], dtype=np.float32).reshape(h, w, 4)
+        _log(f"[gpu_occlusion]  numpy 数组 shape={pix.shape}, dtype={pix.dtype}")
+    except Exception as e:
+        _log(f"[gpu_occlusion]  numpy 转换异常: {e}")
+        img.user_clear()
+        bpy.data.images.remove(img)
+        return None
+
     img.user_clear()
     bpy.data.images.remove(img)
+    _log(f"[gpu_occlusion]  图片资源已释放")
 
-    # Eevee 深度图在 Viewer Node 的 R 通道
-    return pix[:, :, 0]
+    depth = pix[:, :, 0]
+    _log(f"[gpu_occlusion]  R 通道统计: min={depth.min():.6f}, max={depth.max():.6f}, mean={depth.mean():.6f}")
+    _log(f"[gpu_occlusion]  非零像素数: {(depth > 0).sum()} / {depth.size}")
+    return depth
 
-
-# ════════════════════════════════════════════════════════════
-# 深度图推断有效组合
-# ════════════════════════════════════════════════════════════
 
 def _infer_combinations_from_depth(
     depth_nonrem: np.ndarray,
@@ -165,39 +171,39 @@ def _infer_combinations_from_depth(
     index_to_name: Dict[int, str],
     all_meshes: List[bpy.types.Object],
 ) -> dict:
-    """从深度图推断有效组合。
-
-    对所有 2^n 种 mask 做纯 numpy 推断（不渲染），每种 mask 计算其画布深度
-    = min(depth_base, depth_rm[k] for k in mask)，然后判断每个物体是否可见。
-
-    虽然仍是 2^n 次循环，但每次只是 O(W*H) 的 numpy 数组操作，没有渲染开销。
-    """
     _log(f"[gpu_occlusion] ===== 开始 CPU 深度推断有效组合 =====")
+    _log(f"[gpu_occlusion] depth_nonrem shape={depth_nonrem.shape}, dtype={depth_nonrem.dtype}")
 
     base_visible_names = set(non_removable_names)
     n_rem = len(removable_names)
     total = 1 << n_rem
+    _log(f"[gpu_occlusion] removable 数量={n_rem}, 理论组合={total}")
 
-    # 预计算每个物体的深度图数组
-    depth_rm_list: List[Optional[np.ndarray]] = [depth_rm.get(name) for name in removable_names]
+    # 检查 depth_rm 是否有缺失
+    depth_rm_list: List[Optional[np.ndarray]] = []
+    for name in removable_names:
+        d = depth_rm.get(name)
+        if d is None:
+            _log(f"[gpu_occlusion]  警告: {name} depth_rm 为 None")
+            depth_rm_list.append(None)
+        else:
+            _log(f"[gpu_occlusion]  {name} depth_rm shape={d.shape}, 非零={(d>0).sum()}, "
+                 f"min={d.min():.6f}, max={d.max():.6f}")
+            depth_rm_list.append(d)
 
-    # 构建 index <-> name 映射
-    rm_name_to_idx = {name: i for i, name in enumerate(removable_names)}
     idx_to_rm_name = {i: name for i, name in enumerate(removable_names)}
 
     seen_signatures: Set[Tuple[str, ...]] = set()
     effective_list: List[Tuple[int, Set[str]]] = []
 
-    # 初始：仅 non-removable
-    base_visible_sig = tuple(sorted(base_visible_names))
-    if base_visible_sig not in seen_signatures:
-        seen_signatures.add(base_visible_sig)
-        effective_list.append((0, base_visible_names.copy()))
+    base_sig = tuple(sorted(base_visible_names))
+    seen_signatures.add(base_sig)
+    effective_list.append((0, base_visible_names.copy()))
+    _log(f"[gpu_occlusion] 基准组合 (mask=0): visible={sorted(base_visible_names)}")
 
-    _log(f"[gpu_occlusion] 开始枚举 {total} 种组合（纯 CPU numpy 比较）")
+    _log(f"[gpu_occlusion] 开始枚举 {total} 种组合")
 
     for mask in range(1, total):
-        # 计算当前 mask 的画布深度
         canvas = depth_nonrem.copy()
         for i in range(n_rem):
             if (mask >> i) & 1:
@@ -205,39 +211,34 @@ def _infer_combinations_from_depth(
                 if d is not None:
                     canvas = np.minimum(canvas, d)
 
-        # 判断每个物体是否可见
         current_visible = base_visible_names.copy()
         for i in range(n_rem):
             d = depth_rm_list[i]
             if d is None:
                 continue
-            # 如果该物体在任何像素上深度 <= 画布深度（即它出现了）
-            # 注意：物体自身的深度图在该物体的像素上应该 <= 画布深度
-            if (d <= canvas).any() and (d > 0).any():
+            obj_pixels = (d > 1e-6) & (np.abs(d - canvas) < 1e-5)
+            if obj_pixels.any():
                 current_visible.add(idx_to_rm_name[i])
 
         sig = tuple(sorted(current_visible))
         if sig not in seen_signatures:
             seen_signatures.add(sig)
             effective_list.append((mask, current_visible))
-            _log(f"[gpu_occlusion] 组合 mask={mask}: 新增有效组合 → {sorted(current_visible)}")
+            _log(f"[gpu_occlusion]  新增组合 mask={mask}: {sorted(current_visible)}")
 
-    _log(f"[gpu_occlusion] 深度推断完成: {len(effective_list)} 种有效组合")
+    _log(f"[gpu_occlusion] 推断完成: {len(effective_list)} 种有效组合")
 
-    # 统计频次
     from collections import Counter
     freq: Counter[str] = Counter()
     for _mask, vis in effective_list:
         for name in vis:
             freq[name] += 1
 
-    # 收集全场景可见物体（所有 non-removable + 在任何组合中可见的 removable）
     all_visible_set: Set[str] = set(base_visible_names)
     for name in removable_names:
-        if name in depth_rm and depth_rm[name] is not None:
-            d = depth_rm[name]
-            if (d > 0).any():
-                all_visible_set.add(name)
+        d = depth_rm.get(name)
+        if d is not None and (d > 0).any():
+            all_visible_set.add(name)
 
     return {
         "all_objects": [o.name for o in all_meshes],
@@ -254,63 +255,79 @@ def _infer_combinations_from_depth(
     }
 
 
-# ════════════════════════════════════════════════════════════
-# Operator
-# ════════════════════════════════════════════════════════════
-
 class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
     """GPU 加速遮挡分析：基于深度图的组合推断"""
     bl_idname = "zlh.gpu_occlusion_analysis"
     bl_label = "zlh: GPU 遮挡分析"
     bl_options = {"REGISTER", "BLOCKING"}
 
-    # ── 模态状态 ──
     _state: dict = {}
     _timer = None
     _temp_dir: str = ""
-    _phase: str = ""            # "render_base", "render_rm", "infer", "done"
+    _phase: str = ""
     _render_idx: int = 0
     _removable_objs: list = []
     _non_removable_objs: list = []
     _all_meshes: list = []
     _depth_nonrem: Optional[np.ndarray] = None
     _depth_rm: Dict[str, Optional[np.ndarray]] = {}
-
-    # ── 分析结果 ──
     _result: dict = {}
 
     def _cleanup(self, context):
+        _log(f"[gpu_occlusion] _cleanup 开始")
         if self._temp_dir and os.path.isdir(self._temp_dir):
             import shutil
             try:
                 shutil.rmtree(self._temp_dir, ignore_errors=True)
-            except Exception:
-                pass
+                _log(f"[gpu_occlusion] 临时目录已删除: {self._temp_dir}")
+            except Exception as e:
+                _log(f"[gpu_occlusion] 删除临时目录失败: {e}")
             self._temp_dir = ""
 
         state = self._state
         if not state:
+            _log(f"[gpu_occlusion] _cleanup: state 为空，跳过")
             return
 
         scene = context.scene
+        if scene is None:
+            _log(f"[gpu_occlusion] _cleanup: scene 为 None")
+            return
+
         orig_hide = state.get("orig_hide", {})
         orig_render = state.get("orig_render")
         orig_workspace = state.get("orig_workspace")
 
-        for obj in scene.objects:
-            if obj.name in orig_hide:
-                obj.hide_render = orig_hide[obj.name]
+        _log(f"[gpu_occlusion] 恢复 {len(orig_hide)} 个物体的 hide_render")
+        try:
+            for obj in scene.objects:
+                if obj.name in orig_hide:
+                    obj.hide_render = orig_hide[obj.name]
+        except Exception as e:
+            _log(f"[gpu_occlusion] 恢复 hide_render 异常: {e}")
+            _log(f"[gpu_occlusion] traceback: {traceback.format_exc()}")
 
         if orig_render:
-            _restore_render_state(scene, orig_render)
+            try:
+                _restore_render_state(scene, orig_render)
+                _log(f"[gpu_occlusion] 渲染状态已恢复")
+            except Exception as e:
+                _log(f"[gpu_occlusion] 恢复渲染状态异常: {e}")
 
         if orig_workspace and context.window:
-            for ws in bpy.data.workspaces:
-                if ws.name == orig_workspace:
-                    context.window.workspace = ws
-                    break
+            try:
+                for ws in bpy.data.workspaces:
+                    if ws.name == orig_workspace:
+                        context.window.workspace = ws
+                        break
+            except Exception as e:
+                _log(f"[gpu_occlusion] 恢复 workspace 异常: {e}")
 
-        context.view_layer.update()
+        try:
+            context.view_layer.update()
+        except Exception as e:
+            _log(f"[gpu_occlusion] view_layer.update 异常: {e}")
+
         _log("[gpu_occlusion] 场景状态已恢复")
 
     @classmethod
@@ -318,6 +335,7 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         return context.scene is not None and context.scene.camera is not None
 
     def invoke(self, context, _event):
+        _log(f"[gpu_occlusion] ===== invoke 开始 =====")
         self._state = {}
         self._result = {}
         self._temp_dir = ""
@@ -338,15 +356,19 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
         _log("[gpu_occlusion] ===== 开始基于深度图的遮挡分析 =====")
 
-        # ── 1. 收集所有可见 MESH 物体并分配 pass_index（用于识别） ──
+        # 1. 收集所有可见 MESH
         all_meshes: List[bpy.types.Object] = []
         for obj in scene.objects:
-            if obj.type != "MESH":
-                continue
-            if obj.hide_get() or not obj.visible_get():
-                continue
-            all_meshes.append(obj)
+            try:
+                if obj.type != "MESH":
+                    continue
+                if obj.hide_get() or not obj.visible_get():
+                    continue
+                all_meshes.append(obj)
+            except Exception as e:
+                _log(f"[gpu_occlusion] 收集物体异常 ({obj.name}): {e}")
 
+        _log(f"[gpu_occlusion] 可见 MESH 数量: {len(all_meshes)}")
         if not all_meshes:
             self.report({"ERROR"}, "场景中无可见 MESH 物体")
             return {"CANCELLED"}
@@ -357,27 +379,31 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             pid = idx + 1
             obj.pass_index = pid
             index_to_name[pid] = obj.name
+        _log(f"[gpu_occlusion] pass_index 分配完成: {index_to_name}")
 
-        # 筛选 removable / non-removable
+        # 筛选 removable
         removable_objs: List[bpy.types.Object] = []
         non_removable_objs: List[bpy.types.Object] = []
         for obj in all_meshes:
-            if getattr(obj, "zlh_removable", False):
+            is_rem = getattr(obj, "zlh_removable", False)
+            _log(f"[gpu_occlusion]   {obj.name}: zlh_removable={is_rem}")
+            if is_rem:
                 removable_objs.append(obj)
             else:
                 non_removable_objs.append(obj)
 
+        _log(f"[gpu_occlusion] removable: {[o.name for o in removable_objs]}")
+        _log(f"[gpu_occlusion] non-removable: {[o.name for o in non_removable_objs]}")
+
         if not removable_objs:
-            self.report({"ERROR"}, "没有标记为 removable 的物体，无需分析")
+            self.report({"ERROR"}, "没有标记为 removable 的物体")
             return {"CANCELLED"}
 
         removable_names = [o.name for o in removable_objs]
         non_removable_names = [o.name for o in non_removable_objs]
         n_rem = len(removable_objs)
-        _log(f"[gpu_occlusion] 总 MESH = {len(all_meshes)}, "
-             f"removable = {n_rem}, non-removable = {len(non_removable_objs)}")
 
-        # ── 2. 保存原始状态 ──
+        # 保存原始状态
         orig_render = _save_render_state(scene)
         orig_hide: Dict[str, bool] = {}
         for obj in all_meshes:
@@ -386,23 +412,25 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         for obj in scene.objects:
             orig_pass[obj.name] = obj.pass_index
         orig_workspace = context.window.workspace.name if context.window else None
+        _log(f"[gpu_occlusion] 原始状态已保存")
 
-        # ── 3. 设置 Eevee + Compositor ──
+        # 设置 Eevee + Compositor
         scene.render.engine = (
             "BLENDER_EEVEE_NEXT"
             if hasattr(bpy.types, "BLENDER_EEVEE_NEXT")
             else "BLENDER_EEVEE"
         )
         scene.render.resolution_percentage = RENDER_RESOLUTION_PERCENT
+        _log(f"[gpu_occlusion] 渲染引擎: {scene.render.engine}")
 
-        # 启用 Z pass
         scene.view_layers[0].use_pass_z = True
+        _log(f"[gpu_occlusion] use_pass_z 已启用")
 
-        # 切换到 Compositing workspace
         if context.window:
             for ws in bpy.data.workspaces:
                 if ws.name == "Compositing":
                     context.window.workspace = ws
+                    _log(f"[gpu_occlusion] 已切换到 Compositing workspace")
                     break
 
         _reset_compositor_for_depth(scene)
@@ -424,17 +452,18 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         self._non_removable_objs = non_removable_objs
         self._all_meshes = all_meshes
 
-        # ── 4. 创建临时目录, 启动渲染流程 ──
+        # 创建临时目录，启动渲染
         self._temp_dir = tempfile.mkdtemp(prefix="zlh_gpu_occlusion_")
+        _log(f"[gpu_occlusion] 临时目录: {self._temp_dir}")
 
-        total_renders = 1 + n_rem  # base + 每个 removable
+        total_renders = 1 + n_rem
         wm = context.window_manager
         wm.progress_begin(0, total_renders)
 
-        # 先渲染基准深度（仅 non-removable）
         self._phase = "render_base"
-        self._render_idx = 0  # 渲染步骤索引：0 = base, 1..n = rm_i
+        self._render_idx = 0
         self._timer = wm.event_timer_add(0.01, window=context.window)
+        _log(f"[gpu_occlusion] 渲染阶段开始，共 {total_renders} 张")
         wm.modal_handler_add(self)
         return {"RUNNING_MODAL"}
 
@@ -445,112 +474,133 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         wm = context.window_manager
         scene = context.scene
 
-        if self._phase == "render_base":
-            # 隐藏所有 removable，只保留 non-removable
-            for obj in self._all_meshes:
-                obj.hide_render = obj in self._removable_objs
-            context.view_layer.update()
-
-            filepath = os.path.join(self._temp_dir, "depth_base.png")
-            ok = _render_depth_to_file(scene, filepath)
-            if not ok:
+        try:
+            if self._phase == "render_base":
+                return self._modal_render_base(context, wm, scene)
+            elif self._phase == "render_rm":
+                return self._modal_render_rm(context, wm, scene)
+        except Exception as e:
+            _log(f"[gpu_occlusion] modal 异常: {e}")
+            _log(f"[gpu_occlusion] traceback: {traceback.format_exc()}")
+            try:
                 wm.progress_end()
                 self._cleanup(context)
-                self.report({"ERROR"}, "基准深度渲染失败")
-                return {"CANCELLED"}
-
-            self._depth_nonrem = _read_depth_from_file(filepath)
-            if self._depth_nonrem is None:
-                wm.progress_end()
-                self._cleanup(context)
-                self.report({"ERROR"}, "基准深度读取失败")
-                return {"CANCELLED"}
-
-            _log(f"[gpu_occlusion] 基准深度渲染完成 {self._depth_nonrem.shape}")
-            wm.progress_update(0)
-
-            # 切换到渲染每个 removable
-            self._phase = "render_rm"
-            self._render_idx = 0
-            return {"PASS_THROUGH"}
-
-        elif self._phase == "render_rm":
-            if self._render_idx >= len(self._removable_objs):
-                # 所有深度图渲染完毕，继续当前 timer 事件直接做推断
-                self._phase = "done_infer"
-                self._do_infer_and_finish(context)
-                return {"PASS_THROUGH"}
-
-            rm_obj = self._removable_objs[self._render_idx]
-            rm_name = rm_obj.name
-
-            # 只显示当前 removable 物体
-            for obj in self._all_meshes:
-                obj.hide_render = (obj != rm_obj)
-            context.view_layer.update()
-
-            filepath = os.path.join(self._temp_dir, f"depth_rm_{self._render_idx}.png")
-            ok = _render_depth_to_file(scene, filepath)
-            if not ok:
-                _log(f"[gpu_occlusion]  {rm_name} 深度渲染失败，跳过")
-                self._depth_rm[rm_name] = np.zeros_like(self._depth_nonrem)
-            else:
-                depth = _read_depth_from_file(filepath)
-                if depth is None:
-                    depth = np.zeros_like(self._depth_nonrem)
-                self._depth_rm[rm_name] = depth
-                _log(f"[gpu_occlusion]  {rm_name} 深度图渲染完成 ({self._render_idx + 1}/{len(self._removable_objs)})")
-
-            wm.progress_update(1 + self._render_idx + 1)
-            self._render_idx += 1
-            return {"PASS_THROUGH"}
+            except Exception:
+                pass
+            self.report({"ERROR"}, f"分析异常: {e}")
+            return {"CANCELLED"}
 
         return {"PASS_THROUGH"}
 
+    def _modal_render_base(self, context, wm, scene):
+        _log(f"[gpu_occlusion] phase=render_base: 隐藏所有 removable")
+        try:
+            for obj in self._all_meshes:
+                obj.hide_render = obj in self._removable_objs
+            context.view_layer.update()
+        except Exception as e:
+            _log(f"[gpu_occlusion] 设置 hide_render 异常: {e}")
+
+        filepath = os.path.join(self._temp_dir, "depth_base.png")
+        ok = _render_depth_to_file(scene, filepath, "基准深度")
+        if not ok:
+            wm.progress_end()
+            self._cleanup(context)
+            self.report({"ERROR"}, "基准深度渲染失败")
+            return {"CANCELLED"}
+
+        self._depth_nonrem = _read_depth_from_file(filepath, "基准深度")
+        if self._depth_nonrem is None:
+            wm.progress_end()
+            self._cleanup(context)
+            self.report({"ERROR"}, "基准深度读取失败")
+            return {"CANCELLED"}
+
+        _log(f"[gpu_occlusion] 基准深度图: shape={self._depth_nonrem.shape}")
+        wm.progress_update(0)
+
+        self._phase = "render_rm"
+        self._render_idx = 0
+        return {"PASS_THROUGH"}
+
+    def _modal_render_rm(self, context, wm, scene):
+        if self._render_idx >= len(self._removable_objs):
+            self._phase = "done_infer"
+            self._do_infer_and_finish(context)
+            return {"PASS_THROUGH"}
+
+        rm_obj = self._removable_objs[self._render_idx]
+        rm_name = rm_obj.name
+        _log(f"[gpu_occlusion] phase=render_rm: 渲染 {rm_name} ({self._render_idx + 1}/{len(self._removable_objs)})")
+
+        try:
+            for obj in self._all_meshes:
+                obj.hide_render = (obj != rm_obj)
+            context.view_layer.update()
+        except Exception as e:
+            _log(f"[gpu_occlusion] 设置 hide_render 异常: {e}")
+
+        filepath = os.path.join(self._temp_dir, f"depth_rm_{self._render_idx}.png")
+        ok = _render_depth_to_file(scene, filepath, rm_name)
+        if not ok:
+            _log(f"[gpu_occlusion]  {rm_name} 渲染失败，填零替代")
+            self._depth_rm[rm_name] = np.zeros_like(self._depth_nonrem)
+        else:
+            depth = _read_depth_from_file(filepath, rm_name)
+            if depth is None:
+                _log(f"[gpu_occlusion]  {rm_name} 读取失败，填零替代")
+                depth = np.zeros_like(self._depth_nonrem)
+            self._depth_rm[rm_name] = depth
+
+        wm.progress_update(1 + self._render_idx + 1)
+        self._render_idx += 1
+        return {"PASS_THROUGH"}
+
     def _do_infer_and_finish(self, context):
-        """在 infer 阶段执行深度推断并弹出结果对话框。"""
+        _log(f"[gpu_occlusion] ===== _do_infer_and_finish 开始 =====")
         wm = context.window_manager
         if self._timer:
-            wm.event_timer_remove(self._timer)
+            try:
+                wm.event_timer_remove(self._timer)
+                _log(f"[gpu_occlusion] timer 已移除")
+            except Exception as e:
+                _log(f"[gpu_occlusion] 移除 timer 异常: {e}")
             self._timer = None
         wm.progress_end()
 
         state = self._state
-        result = _infer_combinations_from_depth(
-            depth_nonrem=self._depth_nonrem,
-            depth_rm=self._depth_rm,
-            removable_names=state["removable_names"],
-            non_removable_names=state["non_removable_names"],
-            index_to_name=state["index_to_name"],
-            all_meshes=state["all_meshes"],
-        )
-        self._result = result
+        _log(f"[gpu_occlusion] depth_rm 中物体: {list(self._depth_rm.keys())}")
+        _log(f"[gpu_occlusion] removable_names: {state.get('removable_names')}")
+
+        try:
+            result = _infer_combinations_from_depth(
+                depth_nonrem=self._depth_nonrem,
+                depth_rm=self._depth_rm,
+                removable_names=state["removable_names"],
+                non_removable_names=state["non_removable_names"],
+                index_to_name=state["index_to_name"],
+                all_meshes=state["all_meshes"],
+            )
+            self._result = result
+            _log(f"[gpu_occlusion] 推断成功，结果: count={result.get('count')}, "
+                 f"combinations={len(result.get('effective_combinations', []))}")
+        except Exception as e:
+            _log(f"[gpu_occlusion] 推断异常: {e}")
+            _log(f"[gpu_occlusion] traceback: {traceback.format_exc()}")
+            self.report({"ERROR"}, f"深度推断失败: {e}")
+            self._cleanup(context)
+            return
 
         self._cleanup(context)
 
-        _log(f"[gpu_occlusion] 分析完成: {len(result.get('effective_combinations', []))} 种有效组合")
-
-        # 打印结果摘要到控制台
-        _log(f"[gpu_occlusion] ===== 有效组合 ===== ")
+        _log(f"[gpu_occlusion] 分析完成: {result.get('count')} 种有效组合")
+        _log(f"[gpu_occlusion] ===== 有效组合列表 =====")
         for i, combo in enumerate(result.get("effective_combinations", [])):
-            visible = combo.get("visible", [])
-            _log(f"  {i + 1}. mask={combo.get('mask', 0)}: {', '.join(visible) if visible else '（空）'}")
+            vis = combo.get("visible", [])
+            _log(f"  {i + 1}. mask={combo.get('mask', 0)}: {', '.join(vis) if vis else '（空）'}")
 
-        # 延迟一帧弹对话框，避免在 modal 中调用 invoke_props_dialog
-        self._dialog_scheduled = True
-        bpy.app.timers.register(self._delayed_dialog, first_interval=0.01)
-
-    _dialog_scheduled = False
-
-    def _delayed_dialog(self):
-        """延迟弹出的结果对话框。"""
-        try:
-            wm = bpy.context.window_manager
-            if wm:
-                wm.invoke_props_dialog(self, width=700)
-        except Exception:
-            pass
-        return None  # 只执行一次
+        self.report({"INFO"}, f"分析完成: {result.get('count')} 种有效组合（详见控制台）")
+        _log(f"[gpu_occlusion] ===== _do_infer_and_finish 结束 =====")
 
     def draw(self, context):
         layout = self.layout
