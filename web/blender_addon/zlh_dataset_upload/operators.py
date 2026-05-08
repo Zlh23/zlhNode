@@ -10,13 +10,14 @@ import urllib.error
 import urllib.request
 
 import bpy
+from mathutils import Vector
 from bpy.props import StringProperty
 
 from . import _log, ADDON_ID, VERSION_STR, bl_info
 from .http_util import _normalize_base
-from .occlusion import _get_visible_objects
+from .gpu_occlusion import _run_indexob_detection, _build_frustum_planes, _aabb_in_frustum
 from .preferences import _prefs
-from .render_ops import _enumerate_effective_combinations, _render_and_upload
+from .render_ops import _render_to_file
 
 
 class ZLH_OT_SetObjectNames(bpy.types.Operator):
@@ -54,7 +55,7 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
             row.label(text=f"  {o.name}")
             row.prop(o, "zlh_removable", text="removable")
         box2 = layout.box()
-        box2.label(text="提示：标记为 removable 的物体在渲染时会生成含/不含该物体的多张图片", icon="INFO")
+        box2.label(text="提示：标记为 removable 的物体在渲染时会随机选择可见/隐藏", icon="INFO")
 
     def execute(self, context):
         new = self.new_name.strip()
@@ -74,33 +75,23 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
 
 
 class ZLH_OT_RenderUpload(bpy.types.Operator):
-    """渲染并上传，带模式选择：单张 / 全部组合 / 随机 N 种"""
+    """渲染并上传：随机选择 removable 组合，IndexOB 检测实际可见物体"""
     bl_idname = "zlh.render_upload"
     bl_label = "zlh: 渲染上传"
     bl_options = {"REGISTER"}
 
     _render_lock = threading.Lock()
 
-    mode: bpy.props.EnumProperty(
-        name="模式",
-        items=[
-            ("SINGLE", "单张", "仅渲染一张当前视角的图片", 0),
-            ("ALL", "全部组合", "渲染所有实际有效的组合", 1),
-            ("RANDOM", "随机", "随机选 N 种有效组合", 2),
-        ],
-        default="ALL",
-    )
     random_count: bpy.props.IntProperty(
-        name="随机数量 N",
-        description="随机模式的渲染张数",
+        name="随机张数",
+        description="随机渲染的张数",
         default=4,
         min=1,
         max=128,
     )
 
-    _precomputed: list[tuple[int, set[str]]] = []
     _removable_names: list[str] = []
-    _all_effective: list[tuple[int, set[str]]] = []
+    _all_meshes_in_frustum: list = []
 
     @classmethod
     def poll(cls, context):
@@ -116,82 +107,69 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
             self.report({"ERROR"}, "API 根地址需以 http:// 或 https:// 开头")
             return {"CANCELLED"}
 
-        _log("[invoke] ===== 开始 _get_visible_objects 第一次检测 =====")
-        all_visible, removable_list = _get_visible_objects(context)
-        _log(f"[invoke] _get_visible_objects 返回: visible={len(all_visible)} 个, removable={len(removable_list)} 个")
-        if not all_visible:
-            self.report({"WARNING"}, "相机视锥体内没有可见物体")
+        # 1. 视锥体检测所有 MESH
+        _log("[invoke] 构建视锥体...")
+        frustum_planes = _build_frustum_planes(scene)
+
+        all_meshes = []
+        for obj in scene.objects:
+            try:
+                if obj.type != "MESH":
+                    continue
+                if obj.hide_get() or not obj.visible_get():
+                    continue
+                bbox = obj.bound_box
+                if not bbox:
+                    continue
+                world_mat = obj.matrix_world
+                corners_world = [world_mat @ Vector(p) for p in bbox]
+                min_c = Vector((
+                    min(p.x for p in corners_world),
+                    min(p.y for p in corners_world),
+                    min(p.z for p in corners_world),
+                ))
+                max_c = Vector((
+                    max(p.x for p in corners_world),
+                    max(p.y for p in corners_world),
+                    max(p.z for p in corners_world),
+                ))
+                if _aabb_in_frustum(frustum_planes, min_c, max_c):
+                    all_meshes.append(obj)
+            except Exception:
+                pass
+
+        _log(f"[invoke] 视锥体内 MESH 数量: {len(all_meshes)}")
+        if not all_meshes:
+            self.report({"ERROR"}, "场景中无可见 MESH 物体")
             return {"CANCELLED"}
 
-        self._removable_names = [name for name, _ in removable_list]
-        _log(f"[invoke] visible 物体: {sorted(all_visible)}")
-        _log(f"[invoke] removable 物体: {self._removable_names}")
+        # 2. 筛选 removable
+        removable_names = [
+            o.name for o in all_meshes
+            if getattr(o, "zlh_removable", False)
+        ]
 
-        if not self._removable_names:
-            self.mode = "SINGLE"
-            self._precomputed = [(0, all_visible)]
-            return self.execute(context)
-
-        _log("[invoke] ===== 开始 _enumerate_effective_combinations 组合枚举 =====")
-        self.report({"INFO"}, "正在分析遮挡关系，计算有效组合…")
-        removable_objs = [obj for _, obj in removable_list]
-        try:
-            effective = _enumerate_effective_combinations(
-                context, all_visible, self._removable_names, removable_objs,
-            )
-            _log(f"[invoke] _enumerate_effective_combinations 返回 {len(effective)} 种有效组合")
-        except Exception as e:
-            _log(f"[invoke] 遮挡分析异常: {e}")
-            import traceback
-            _log(f"[invoke] traceback: {traceback.format_exc()}")
-            self.report({"ERROR"}, f"遮挡分析失败: {e}")
+        if not removable_names:
+            self.report({"ERROR"}, "没有标记为 removable 的物体（请先用 Ctrl+Shift+O 标记）")
             return {"CANCELLED"}
 
-        self._all_effective = effective
-        self._precomputed = list(effective)
+        _log(f"[invoke] removable 物体: {removable_names}")
+        self._removable_names = removable_names
+        self._all_meshes_in_frustum = all_meshes
 
-        if not effective:
-            self.report({"WARNING"}, "所有组合的遮挡分析结果为空，请检查场景")
-            return {"CANCELLED"}
-
-        if len(effective) == 1:
-            return self.execute(context)
-
-        return context.window_manager.invoke_props_dialog(self, width=520)
+        return context.window_manager.invoke_props_dialog(self, width=400)
 
     def draw(self, context):
         layout = self.layout
-        effective = getattr(self, "_all_effective", [])
         removable_names = getattr(self, "_removable_names", [])
-        n = len(removable_names)
-        total_effective = len(effective)
-
-        box_info = layout.box()
-        box_info.label(text=f"removable 物体: {n} 个  |  理论组合: {1 << n} 种", icon="OBJECT_DATA")
-        box_info.label(text=f"遮挡分析后实际有效: {total_effective} 种", icon="RENDER_STILL")
-
-        layout.prop(self, "mode", expand=True)
-        if self.mode == "RANDOM":
-            row = layout.row()
-            row.prop(self, "random_count")
-            count = min(self.random_count, total_effective)
-        elif self.mode == "ALL":
-            count = total_effective
-        else:
-            count = 1
-
+        layout.label(text=f"removable 物体: {len(removable_names)} 个", icon="OBJECT_DATA")
+        for name in removable_names:
+            layout.label(text=f"  {name}")
+        layout.separator()
+        layout.prop(self, "random_count")
         box = layout.box()
-        box.label(text=f"即将渲染 {count} 张，各 tag 出现频次:", icon="INFO")
-
-        # 统计每种 tag 在多少种有效组合中出现
-        from collections import Counter
-        tag_counter: Counter[str] = Counter()
-        for _mask, vis_names in effective:
-            tag = ",".join(sorted(vis_names))
-            tag_counter[tag] += 1
-        for tag, freq in tag_counter.most_common():
-            box.label(text=f"  {tag} — {freq} 种")
-
+        box.label(text="流程：随机选择可见子集 → 渲染 →", icon="RENDER_STILL")
+        box.label(text="      IndexOB 检测实际出现的物体 → 上传", icon="FILE_TICK")
         box.label(text="确认后将开始渲染，是否继续？", icon="QUESTION")
 
     def execute(self, context):
@@ -214,83 +192,126 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
 
         output_dir = _prefs(context).output_dir.strip()
         if not output_dir:
-            self.report({"ERROR"}, "请先在偏好设置中配置输出目录（指向 WSL 共享目录）")
+            self.report({"ERROR"}, "请先在偏好设置中配置输出目录")
             ZLH_OT_RenderUpload._render_lock.release()
             return {"CANCELLED"}
 
+        removable_names = self._removable_names
+        all_meshes = self._all_meshes_in_frustum
+        n_rem = len(removable_names)
+
+        # 生成随机组合（mask: 第 i 位=1 表示 removable_names[i] 显示）
+        count = min(self.random_count, 1 << n_rem)
+        masks = list(range(1 << n_rem))
+        if len(masks) > count:
+            masks = random.sample(masks, count)
+
+        _log(f"[execute] 随机 {count} 种组合，masks={masks}")
+
+        wm = context.window_manager
+        wm.progress_begin(0, count)
+
+        uploaded = 0
+        errors = []
         try:
-            effective = self._precomputed
-            removable_names = self._removable_names
-
-            if not effective:
-                self.report({"ERROR"}, "未找到有效组合（请重新按 Ctrl+Shift+B）")
-                return {"CANCELLED"}
-
-            if self.mode == "SINGLE":
-                masks_to_render = [effective[0]]
-            elif self.mode == "ALL":
-                masks_to_render = list(effective)
-            elif self.mode == "RANDOM":
-                count = min(self.random_count, len(effective))
-                masks_to_render = random.sample(effective, count)
-            else:
-                masks_to_render = []
-
-            _log(f"[execute] mode={self.mode} 需渲染 {len(masks_to_render)} 张")
-
-            affected: set[str] = set()
-            for _, vis_names in masks_to_render:
-                affected.update(vis_names)
-            affected &= set(removable_names)
-
-            orig_hide = {}
-            for name in affected:
-                obj = scene.objects.get(name)
-                if obj:
-                    orig_hide[name] = obj.hide_render
-
-            wm = context.window_manager
-            total = len(masks_to_render)
-            wm.progress_begin(0, total)
-
-            uploaded = 0
-            errors = []
-            for idx, (_mask, vis_names) in enumerate(masks_to_render):
+            for idx, mask in enumerate(masks):
                 wm.progress_update(idx)
-                self.report({"INFO"}, f"渲染中… {idx + 1}/{total}")
-                _log(f"[execute] 渲染 {idx + 1}/{total} vis_names={sorted(vis_names)}")
+                self.report({"INFO"}, f"渲染中… {idx + 1}/{count}")
+                _log(f"[execute] === 组合 {idx + 1}/{count} mask={mask} ===")
+
+                # 哪些 removable 可见
+                visible_rem = set()
+                for i in range(n_rem):
+                    if (mask >> i) & 1:
+                        visible_rem.add(removable_names[i])
+
+                _log(f"[execute]  预定可见: {sorted(visible_rem)}")
+
+                # 隐藏不需要的 removable
+                orig_hide = {}
+                for name in removable_names:
+                    obj = scene.objects.get(name)
+                    if obj:
+                        orig_hide[name] = obj.hide_render
+                        obj.hide_render = name not in visible_rem
+
+                context.view_layer.update()
+
+                # 渲染图片
+                fname = None
+                try:
+                    fname = _render_to_file(context, output_dir)
+                    _log(f"[execute]  渲染完成: {fname}")
+                except Exception as e:
+                    _log(f"[execute]  渲染失败: {e}")
+                    errors.append(f"第 {idx + 1}/{count} 渲染失败: {e}")
+                    for name in removable_names:
+                        obj = scene.objects.get(name)
+                        if obj and name in orig_hide:
+                            obj.hide_render = orig_hide[name]
+                    continue
+                finally:
+                    for name in removable_names:
+                        obj = scene.objects.get(name)
+                        if obj and name in orig_hide:
+                            obj.hide_render = orig_hide[name]
+
+                # IndexOB 检测实际可见物体
+                # 构建需要传给检测函数的物体列表（包括不可移除的 + 预定可见的 removable）
+                all_mesh_objs_for_idx = []
+                for obj in all_meshes:
+                    if obj.name not in removable_names or obj.name in visible_rem:
+                        all_mesh_objs_for_idx.append(obj)
 
                 try:
-                    _render_and_upload(context, base, output_dir, vis_names, affected, orig_hide)
+                    idx_result = _run_indexob_detection(context, all_mesh_objs_for_idx)
+                    actual_visible = idx_result["visible_objects"]
+                    _log(f"[execute]  IndexOB 检测实际可见: {actual_visible}")
+                except Exception as e:
+                    _log(f"[execute]  IndexOB 检测失败: {e}")
+                    import traceback
+                    _log(traceback.format_exc())
+                    # 降级：用预定的可见物体
+                    all_visible = [o.name for o in all_meshes
+                                   if o.name not in removable_names or o.name in visible_rem]
+                    actual_visible = list(all_visible)
+
+                # 上传
+                names_str = ",".join(sorted(actual_visible))
+                try:
+                    from .http_util import _post_render_output
+                    data = _post_render_output(base, fname, names_str)
+                    if not data.get("ok"):
+                        raise RuntimeError(f"服务器返回错误: {data.get('error', 'unknown')}")
                     uploaded += 1
-                    _log(f"[execute] 渲染上传成功 {idx + 1}/{total}")
+                    _log(f"[execute]  上传成功: outfit={names_str} file={fname}")
                 except urllib.error.HTTPError as e:
                     err_text = ""
                     try:
                         err_text = e.read().decode("utf-8", errors="replace")[:200]
                     except Exception:
                         pass
-                    msg = f"第 {idx + 1}/{total} 上传失败 HTTP {e.code} {err_text}"
-                    _log(f"[execute] 错误: {msg}")
+                    msg = f"第 {idx + 1}/{count} 上传失败 HTTP {e.code} {err_text}"
+                    _log(f"[execute]  错误: {msg}")
                     errors.append(msg)
                     self.report({"WARNING"}, msg)
                 except urllib.error.URLError as e:
-                    msg = f"第 {idx + 1}/{total} 网络错误: {e.reason}"
-                    _log(f"[execute] 错误: {msg}")
+                    msg = f"第 {idx + 1}/{count} 网络错误: {e.reason}"
+                    _log(f"[execute]  错误: {msg}")
                     errors.append(msg)
                     self.report({"WARNING"}, msg)
                 except Exception as e:
-                    msg = f"第 {idx + 1}/{total} 错误: {e}"
-                    _log(f"[execute] 错误: {msg}")
+                    msg = f"第 {idx + 1}/{count} 错误: {e}"
+                    _log(f"[execute]  错误: {msg}")
                     import traceback
-                    _log(f"[execute] traceback: {traceback.format_exc()}")
+                    _log(traceback.format_exc())
                     errors.append(msg)
                     self.report({"WARNING"}, msg)
 
             wm.progress_end()
 
             if errors:
-                self.report({"WARNING"}, f"上传完成：成功 {uploaded}/{total}，{len(errors)} 个错误")
+                self.report({"WARNING"}, f"上传完成：成功 {uploaded}/{count}，{len(errors)} 个错误")
             else:
                 self.report({"INFO"}, f"全部上传完成：共 {uploaded} 张图片")
             return {"FINISHED"}
