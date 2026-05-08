@@ -515,7 +515,7 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
         box = layout.box()
         box.label(text=f"removable: {n_rem} 个物体", icon="OBJECT_DATA")
-        box.label(text=f"非 removable: {len(non_removable)} 个", icon="SCENE_DATA")
+        box.label(text=f"非 removable: {len(non_removable_names)} 个", icon="SCENE_DATA")
         box.label(text=f"理论组合: {theoretical} 种", icon="MODIFIER")
         box.label(text=f"实际有效: {actual} 种 (节省 {saved} 次渲染, "
                        f"{saved/theoretical*100:.1f}%)",
