@@ -1,4 +1,4 @@
-"""数据集：图片列表，每张图片自带 outfit/scene 元数据。"""
+"""数据集：图册（Album）管理，每个图册有一组 images + tags（标注）。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .bridge_routes import _json, _preflight
 
 logger = logging.getLogger(__name__)
 
-STATE_VERSION = 5
+ALBUM_STATE_VERSION = 6
 
 
 def _package_dir() -> str:
@@ -36,24 +36,6 @@ def _work_dir() -> str:
 
 def _state_path() -> str:
     return os.path.join(_work_dir(), "state.json")
-
-
-def _legacy_flat_image_path(index1: int) -> str:
-    """旧版单文件 temp/dataset/images/{n}.png。"""
-    d = os.path.join(_work_dir(), "images")
-    return os.path.join(d, f"{index1}.png")
-
-
-def _cells_root() -> str:
-    p = os.path.join(_work_dir(), "cells")
-    os.makedirs(p, exist_ok=True)
-    return p
-
-
-def _cell_dir(index1: int) -> str:
-    p = os.path.join(_cells_root(), str(index1))
-    os.makedirs(p, exist_ok=True)
-    return p
 
 
 def _pool_dir() -> str:
@@ -73,8 +55,6 @@ def _stash_dir() -> str:
 
 
 def _blender_render_dir() -> str:
-    """Blender 渲染输出的共享目录（WSL 侧路径），
-    Windows Blender 通过 \\\\wsl.localhost\\Ubuntu\\... 映射到此目录。"""
     p = os.path.join(_package_dir(), "temp", "blender_render")
     os.makedirs(p, exist_ok=True)
     return p
@@ -109,87 +89,68 @@ def _valid_file_id(fid: str) -> bool:
     return all(c in "0123456789abcdef" for c in fid)
 
 
-def _default_image_entry() -> dict[str, Any]:
-    return {"fid": "", "outfit": "", "scene": ""}
+def _valid_album_id(aid: str) -> bool:
+    if not isinstance(aid, str) or len(aid) != 32:
+        return False
+    return all(c in "0123456789abcdef" for c in aid)
 
 
-def _normalize_image_entry(entry: Any) -> dict[str, Any]:
-    if not isinstance(entry, dict):
-        return _default_image_entry()
-    out = _default_image_entry()
-    fid = entry.get("fid")
-    if isinstance(fid, str) and _valid_file_id(fid):
-        if os.path.isfile(_pool_file_path(fid)):
-            out["fid"] = fid
-        else:
-            out["fid"] = ""
-    out["outfit"] = str(entry.get("outfit", "") or "")
-    out["scene"] = str(entry.get("scene", "") or "")
-    return out
+# ────────────────────────────────── Album 数据模型 ──────────────────────────────────
+
+
+def _default_album() -> dict[str, Any]:
+    return {"aid": "", "tags": "", "images": []}
 
 
 def _default_state() -> dict[str, Any]:
-    return {"version": STATE_VERSION, "images": []}
+    return {"version": ALBUM_STATE_VERSION, "albums": []}
 
 
-def _reconcile_images(st: dict[str, Any]) -> None:
-    """清理 images 中 fid 无效或文件不存在的条目。"""
-    raw = st.get("images")
+def _normalize_album(entry: Any) -> dict[str, Any] | None:
+    if not isinstance(entry, dict):
+        return None
+    aid = entry.get("aid")
+    if not isinstance(aid, str) or not _valid_album_id(aid):
+        return None
+    tags = str(entry.get("tags") or "")
+    raw_images = entry.get("images")
+    images: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if isinstance(raw_images, list):
+        for img in raw_images:
+            if not isinstance(img, dict):
+                continue
+            fid = img.get("fid")
+            if isinstance(fid, str) and _valid_file_id(fid) and fid not in seen:
+                if os.path.isfile(_pool_file_path(fid)):
+                    images.append({"fid": fid})
+                    seen.add(fid)
+    if not images:
+        return None
+    return {"aid": aid, "tags": tags, "images": images}
+
+
+def _reconcile_albums(st: dict[str, Any]) -> None:
+    raw = st.get("albums")
     if not isinstance(raw, list):
-        st["images"] = []
+        st["albums"] = []
         return
     out: list[dict[str, Any]] = []
-    seen_fids: set[str] = set()
+    seen_aids: set[str] = set()
     for entry in raw:
-        e = _normalize_image_entry(entry)
-        if not e["fid"] or e["fid"] in seen_fids:
+        a = _normalize_album(entry)
+        if a is None or a["aid"] in seen_aids:
             continue
-        seen_fids.add(e["fid"])
-        out.append(e)
-    st["images"] = out
+        seen_aids.add(a["aid"])
+        out.append(a)
+    st["albums"] = out
 
 
-def _migrate_v4_to_v5(st: dict[str, Any]) -> dict[str, Any]:
-    """从 v4（stringAs + cells + pool）迁移到 v5（images 数组）。"""
-    images: list[dict[str, Any]] = []
-    seen_fids: set[str] = set()
+def _compute_album_hash(albums: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(json.dumps(albums, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
-    # 从旧 cells 中解析出 headerId 的图片
-    cells = st.get("cells")
-    string_as = st.get("stringAs", [])
-    if isinstance(cells, list):
-        for i, cell in enumerate(cells):
-            if not isinstance(cell, dict):
-                continue
-            hid = cell.get("headerId")
-            if isinstance(hid, str) and _valid_file_id(hid) and hid not in seen_fids:
-                row = i // 8  # COL_COUNT = 8
-                outfit = ""
-                if isinstance(string_as, list) and 0 <= row < len(string_as):
-                    outfit = str(string_as[row] or "")
-                scene = str(cell.get("stringB", "") or "")
-                images.append({"fid": hid, "outfit": outfit, "scene": scene})
-                seen_fids.add(hid)
 
-    # 从旧 pool 中取出未出现在 cell 中的图片
-    pool = st.get("pool")
-    if isinstance(pool, list):
-        for fid in pool:
-            if isinstance(fid, str) and _valid_file_id(fid) and fid not in seen_fids:
-                images.append({"fid": fid, "outfit": "", "scene": ""})
-                seen_fids.add(fid)
-
-    # 清理 pool 中不在任何引用里的孤立 png 文件
-    for fname in os.listdir(_pool_dir()):
-        if fname.endswith(".png"):
-            fid = fname[:-4]
-            if _valid_file_id(fid) and fid not in seen_fids:
-                try:
-                    os.remove(os.path.join(_pool_dir(), fname))
-                except OSError:
-                    pass
-
-    return {"version": STATE_VERSION, "images": images}
+# ────────────────────────────────── 状态读写 ──────────────────────────────────
 
 
 def load_state() -> dict[str, Any]:
@@ -208,15 +169,28 @@ def load_state() -> dict[str, Any]:
 
     ver = st.get("version")
 
-    if ver == STATE_VERSION:
-        # 已经是 v5
-        _reconcile_images(st)
+    if ver == ALBUM_STATE_VERSION:
+        _reconcile_albums(st)
         return st
 
-    # 从任意低版本（v1-v4 或 None）迁移到 v5
-    # 如果具有旧版数据结构（cells/pool/stringAs），从中提取图片
-    if isinstance(st.get("cells"), list) or isinstance(st.get("pool"), list) or ver is None or ver < STATE_VERSION:
-        st = _migrate_v4_to_v5(st)
+    # 从旧版迁移：v5 的 images 数组 → albums
+    old_images = st.get("images")
+    if isinstance(old_images, list):
+        albums: list[dict[str, Any]] = []
+        for entry in old_images:
+            if not isinstance(entry, dict):
+                continue
+            fid = entry.get("fid")
+            if not isinstance(fid, str) or not _valid_file_id(fid):
+                continue
+            if not os.path.isfile(_pool_file_path(fid)):
+                continue
+            outfit = str(entry.get("outfit") or "")
+            scene = str(entry.get("scene") or "")
+            tags = f"{outfit}, {scene}" if scene else outfit
+            aid = uuid.uuid4().hex
+            albums.append({"aid": aid, "tags": tags, "images": [{"fid": fid}]})
+        st = {"version": ALBUM_STATE_VERSION, "albums": albums}
         save_state(st)
         return st
 
@@ -227,14 +201,17 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(st: dict[str, Any]) -> None:
-    _reconcile_images(st)
-    st["version"] = STATE_VERSION
+    _reconcile_albums(st)
+    st["version"] = ALBUM_STATE_VERSION
     path = _state_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp." + uuid.uuid4().hex
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+# ────────────────────────────────── 图片文件操作 ──────────────────────────────────
 
 
 def _b64_to_png_bytes(data_b64: str) -> bytes:
@@ -252,7 +229,6 @@ def _b64_to_png_bytes(data_b64: str) -> bytes:
 
 
 def _save_image_file(png: bytes) -> str | None:
-    """保存图片到 pool 目录，返回 fid。"""
     if len(png) > 40 * 1024 * 1024:
         return None
     fid = uuid.uuid4().hex
@@ -266,31 +242,6 @@ def _save_image_file(png: bytes) -> str | None:
         logger.warning("[dataset] save image: %s", e)
         return None
     return fid
-
-
-def _save_image_entry(b64: str, outfit: str, scene: str) -> tuple[str | None, list[dict[str, Any]]]:
-    """解码 base64 → 存 PNG → 写入 state → 返回 (fid, images)。"""
-    try:
-        png = _b64_to_png_bytes(b64)
-    except Exception as e:
-        raise ValueError(f"image_decode_failed: {e}") from e
-    return _save_image_entry_from_png(png, outfit, scene)
-
-
-def _save_image_entry_from_png(png: bytes, outfit: str, scene: str) -> tuple[str | None, list[dict[str, Any]]]:
-    """保存 PNG bytes，不重复立即写入。"""
-    fid = _save_image_file(png)
-    if not fid:
-        raise RuntimeError("write_failed")
-
-    st = load_state()
-    imgs = st.setdefault("images", [])
-    if not isinstance(imgs, list):
-        imgs = []
-        st["images"] = imgs
-    imgs.append({"fid": fid, "outfit": outfit, "scene": scene})
-    save_state(st)
-    return fid, st["images"]
 
 
 def _bridge_stash_count() -> int:
@@ -319,10 +270,52 @@ def _clear_bridge_stash() -> None:
             pass
 
 
+def _cleanup_orphan_pool_files(st: dict[str, Any]) -> None:
+    """删除 pool 中不被任何 album 引用的图片文件。"""
+    referenced: set[str] = set()
+    for album in st.get("albums", []):
+        if isinstance(album, dict):
+            for img in album.get("images", []):
+                if isinstance(img, dict):
+                    fid = img.get("fid")
+                    if isinstance(fid, str):
+                        referenced.add(fid)
+    for fname in os.listdir(_pool_dir()):
+        if fname.endswith(".png"):
+            fid = fname[:-4]
+            if _valid_file_id(fid) and fid not in referenced:
+                try:
+                    os.remove(os.path.join(_pool_dir(), fname))
+                except OSError:
+                    pass
+
+
+# ────────────────────────────────── Blender 渲染接口 ──────────────────────────────────
+
+
+def _save_blender_render_and_create_album(png: bytes, tags: str) -> tuple[str | None, list[dict[str, Any]]]:
+    """保存 Blender 渲染图到一个新 album，返回 (aid, albums)。"""
+    fid = _save_image_file(png)
+    if not fid:
+        return None, []
+    aid = uuid.uuid4().hex
+    st = load_state()
+    albums = st.setdefault("albums", [])
+    if not isinstance(albums, list):
+        albums = []
+        st["albums"] = albums
+    albums.append({"aid": aid, "tags": tags, "images": [{"fid": fid}]})
+    save_state(st)
+    return aid, st["albums"]
+
+
+# ────────────────────────────────── 注册路由 ──────────────────────────────────
+
+
 def register() -> None:
     server = PromptServer.instance
 
-    # --- state ---
+    # ── state ──
 
     @server.routes.options("/bridge/dataset/state")
     async def _opt_state(_request: web.Request) -> web.Response:
@@ -331,15 +324,9 @@ def register() -> None:
     @server.routes.get("/bridge/dataset/state")
     async def dataset_get_state(_request: web.Request) -> web.Response:
         st = load_state()
-        images = st.get("images", [])
-        h = hashlib.sha256(json.dumps(images, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
-        return _json(
-            {
-                "version": st["version"],
-                "images": images,
-                "hash": h,
-            }
-        )
+        albums = st.get("albums", [])
+        h = _compute_album_hash(albums)
+        return _json({"version": st["version"], "albums": albums, "hash": h})
 
     @server.routes.put("/bridge/dataset/state")
     async def dataset_put_state(request: web.Request) -> web.Response:
@@ -347,34 +334,25 @@ def register() -> None:
             body = await request.json()
         except json.JSONDecodeError:
             return _json({"error": "invalid JSON"}, status=400)
-        images_in = body.get("images")
-        if not isinstance(images_in, list):
-            return _json({"error": "images must be array"}, status=400)
+        albums_in = body.get("albums")
+        if not isinstance(albums_in, list):
+            return _json({"error": "albums must be array"}, status=400)
         st = load_state()
-        # 收集所有可能的 fid 并更新/新增
-        new_images: list[dict[str, Any]] = []
-        seen_fids: set[str] = set()
-        for entry in images_in:
-            e = _normalize_image_entry(entry)
-            if not e["fid"] or e["fid"] in seen_fids:
+        new_albums: list[dict[str, Any]] = []
+        seen_aids: set[str] = set()
+        for entry in albums_in:
+            a = _normalize_album(entry)
+            if a is None or a["aid"] in seen_aids:
                 continue
-            seen_fids.add(e["fid"])
-            new_images.append(e)
-        # 清理不再引用的文件
-        for fname in os.listdir(_pool_dir()):
-            if fname.endswith(".png"):
-                fid = fname[:-4]
-                if _valid_file_id(fid) and fid not in seen_fids:
-                    try:
-                        os.remove(os.path.join(_pool_dir(), fname))
-                    except OSError:
-                        pass
-        st["images"] = new_images
+            seen_aids.add(a["aid"])
+            new_albums.append(a)
+        st["albums"] = new_albums
+        _cleanup_orphan_pool_files(st)
         save_state(st)
-        h = hashlib.sha256(json.dumps(st["images"], sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
-        return _json({"ok": True, "images": st["images"], "hash": h})
+        h = _compute_album_hash(st["albums"])
+        return _json({"ok": True, "albums": st["albums"], "hash": h})
 
-    # --- 图片上传/读取/删除 ---
+    # ── 图片上传（创建新 album）──
 
     @server.routes.options("/bridge/dataset/image")
     async def _opt_image(_request: web.Request) -> web.Response:
@@ -382,6 +360,7 @@ def register() -> None:
 
     @server.routes.post("/bridge/dataset/image")
     async def dataset_post_image(request: web.Request) -> web.Response:
+        """上传一张图片，创建新 album。"""
         try:
             body = await request.json()
         except json.JSONDecodeError:
@@ -389,21 +368,27 @@ def register() -> None:
         b64 = body.get("image_base64")
         if not isinstance(b64, str) or not b64.strip():
             return _json({"error": "image_base64 required"}, status=400)
-        outfit = body.get("outfit", "")
-        if not isinstance(outfit, str):
-            outfit = ""
-        scene = body.get("scene", "")
-        if not isinstance(scene, str):
-            scene = ""
+        tags = body.get("tags", "")
+        if not isinstance(tags, str):
+            tags = ""
         try:
-            fid, images = _save_image_entry(b64, outfit, scene)
-        except ValueError as e:
-            return _json({"error": str(e)}, status=400)
-        except RuntimeError as e:
-            return _json({"error": str(e)}, status=500)
+            png = _b64_to_png_bytes(b64)
         except Exception as e:
-            return _json({"error": f"unexpected: {e}"}, status=500)
-        return _json({"ok": True, "id": fid, "images": images})
+            return _json({"error": f"image_decode_failed: {e}"}, status=400)
+        fid = _save_image_file(png)
+        if not fid:
+            return _json({"error": "write_failed"}, status=500)
+        aid = uuid.uuid4().hex
+        st = load_state()
+        albums = st.setdefault("albums", [])
+        if not isinstance(albums, list):
+            albums = []
+            st["albums"] = albums
+        albums.append({"aid": aid, "tags": tags, "images": [{"fid": fid}]})
+        save_state(st)
+        return _json({"ok": True, "id": fid, "album_id": aid, "albums": st["albums"]})
+
+    # ── 图片读取 ──
 
     @server.routes.options("/bridge/dataset/image/{file_id}")
     async def _opt_image_item(_request: web.Request) -> web.Response:
@@ -427,25 +412,114 @@ def register() -> None:
         r.headers["Cache-Control"] = "no-store"
         return r
 
+    # ── 删除单张图片（从 album 中移除，如果 album 空了则删 album）──
+
     @server.routes.delete("/bridge/dataset/image/{file_id}")
     async def dataset_delete_image(request: web.Request) -> web.Response:
         fid = request.match_info.get("file_id", "")
         if not _valid_file_id(fid):
             return _json({"error": "bad file_id"}, status=400)
+        st = load_state()
+        albums = st.get("albums", [])
+        if isinstance(albums, list):
+            for album in albums:
+                if not isinstance(album, dict):
+                    continue
+                imgs = album.get("images", [])
+                if isinstance(imgs, list):
+                    album["images"] = [x for x in imgs if isinstance(x, dict) and x.get("fid") != fid]
+        # 删除空 album
+        st["albums"] = [a for a in albums if isinstance(a, dict) and a.get("images")]
+        # 删除文件
         path = _pool_file_path(fid)
         try:
             if os.path.isfile(path):
                 os.remove(path)
-        except OSError as e:
-            return _json({"error": str(e)}, status=500)
-        st = load_state()
-        imgs = st.get("images")
-        if isinstance(imgs, list):
-            st["images"] = [x for x in imgs if isinstance(x, dict) and x.get("fid") != fid]
+        except OSError:
+            pass
         save_state(st)
-        return _json({"ok": True, "images": st.get("images", [])})
+        return _json({"ok": True, "albums": st.get("albums", [])})
 
-    # --- Blender 渲染输出接口 ---
+    # ── 往指定 album 添加子图 ──
+
+    @server.routes.options("/bridge/dataset/album/{album_id}/image")
+    async def _opt_album_image(_request: web.Request) -> web.Response:
+        return _preflight()
+
+    @server.routes.post("/bridge/dataset/album/{album_id}/image")
+    async def dataset_post_album_image(request: web.Request) -> web.Response:
+        aid = request.match_info.get("album_id", "")
+        if not _valid_album_id(aid):
+            return _json({"error": "bad album_id"}, status=400)
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return _json({"error": "invalid JSON"}, status=400)
+        b64 = body.get("image_base64")
+        if not isinstance(b64, str) or not b64.strip():
+            return _json({"error": "image_base64 required"}, status=400)
+        try:
+            png = _b64_to_png_bytes(b64)
+        except Exception as e:
+            return _json({"error": f"image_decode_failed: {e}"}, status=400)
+        fid = _save_image_file(png)
+        if not fid:
+            return _json({"error": "write_failed"}, status=500)
+
+        st = load_state()
+        albums = st.setdefault("albums", [])
+        target = None
+        for a in albums:
+            if isinstance(a, dict) and a.get("aid") == aid:
+                target = a
+                break
+        if target is None:
+            return _json({"error": "album not found"}, status=404)
+        imgs = target.setdefault("images", [])
+        if not isinstance(imgs, list):
+            imgs = []
+            target["images"] = imgs
+        imgs.append({"fid": fid})
+        save_state(st)
+        return _json({"ok": True, "id": fid, "albums": st["albums"]})
+
+    # ── 删除 album ──
+
+    @server.routes.options("/bridge/dataset/album/{album_id}")
+    async def _opt_album(_request: web.Request) -> web.Response:
+        return _preflight()
+
+    @server.routes.delete("/bridge/dataset/album/{album_id}")
+    async def dataset_delete_album(request: web.Request) -> web.Response:
+        aid = request.match_info.get("album_id", "")
+        if not _valid_album_id(aid):
+            return _json({"error": "bad album_id"}, status=400)
+        st = load_state()
+        albums = st.get("albums", [])
+        if not isinstance(albums, list):
+            return _json({"ok": True, "albums": []})
+        removed_fids: set[str] = set()
+        for a in albums:
+            if isinstance(a, dict) and a.get("aid") == aid:
+                for img in a.get("images", []):
+                    if isinstance(img, dict):
+                        f = img.get("fid")
+                        if isinstance(f, str):
+                            removed_fids.add(f)
+                break
+        st["albums"] = [a for a in albums if isinstance(a, dict) and a.get("aid") != aid]
+        # 删除文件
+        for fid in removed_fids:
+            p = _pool_file_path(fid)
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        save_state(st)
+        return _json({"ok": True, "albums": st.get("albums", [])})
+
+    # ── Blender 渲染输出接口 ──
 
     @server.routes.options("/bridge/render/output")
     async def _opt_render_output(_request: web.Request) -> web.Response:
@@ -461,14 +535,12 @@ def register() -> None:
         filename = body.get("filename")
         if not isinstance(filename, str) or not filename.strip():
             return _json({"error": "filename required"}, status=400)
-        # 安全校验：只允许 .png 文件，防止路径穿越
         if not filename.endswith(".png") or "/" in filename or "\\" in filename:
             return _json({"error": "invalid filename"}, status=400)
-        outfit = body.get("object_names", "")
-        if not isinstance(outfit, str):
-            outfit = ""
+        tags = body.get("object_names", "")
+        if not isinstance(tags, str):
+            tags = ""
 
-        # 从共享目录读取 Blender 渲染好的 PNG
         src_path = os.path.join(_blender_render_dir(), filename)
         if not os.path.isfile(src_path):
             return _json({"error": f"file not found: {filename}"}, status=404)
@@ -482,23 +554,28 @@ def register() -> None:
             return _json({"error": "empty file"}, status=400)
 
         try:
-            fid, images = _save_image_entry_from_png(png, outfit, "")
-        except ValueError as e:
-            return _json({"error": str(e)}, status=400)
-        except RuntimeError as e:
-            return _json({"error": str(e)}, status=500)
+            aid, albums = _save_blender_render_and_create_album(png, tags)
         except Exception as e:
-            return _json({"error": f"unexpected: {e}"}, status=500)
+            return _json({"error": str(e)}, status=500)
         finally:
-            # 无论成功失败，删除已处理的临时文件
             try:
                 os.remove(src_path)
             except OSError:
                 pass
 
-        return _json({"ok": True, "id": fid, "images": images})
+        if not aid:
+            return _json({"error": "write_failed"}, status=500)
+        # 需要找到第一个图片的 fid
+        first_fid = ""
+        for a in albums:
+            if a.get("aid") == aid:
+                imgs = a.get("images", [])
+                if imgs:
+                    first_fid = imgs[0].get("fid", "")
+                break
+        return _json({"ok": True, "id": first_fid, "album_id": aid, "albums": albums})
 
-    # --- 清空 ---
+    # ── 清空 ──
 
     @server.routes.options("/bridge/dataset/clear-images")
     async def _opt_clear(_request: web.Request) -> web.Response:
@@ -518,11 +595,11 @@ def register() -> None:
                 except OSError:
                     pass
         st = load_state()
-        st["images"] = []
+        st["albums"] = []
         save_state(st)
         return _json({"ok": True})
 
-    # --- 导出 ---
+    # ── 导出 ──
 
     @server.routes.options("/bridge/dataset/save")
     async def _opt_dataset_save(_request: web.Request) -> web.Response:
@@ -530,23 +607,28 @@ def register() -> None:
 
     @server.routes.post("/bridge/dataset/save")
     async def dataset_save(_request: web.Request) -> web.StreamResponse:
+        """导出：遍历所有 album，每张子图导出一个 PNG + 一个 TXT（内容为 album.tags）。"""
         resp = web.StreamResponse(headers=_ndjson_job_headers())
         await resp.prepare(_request)
         st = load_state()
-        images = st.get("images", [])
-        if not isinstance(images, list):
-            images = []
+        albums = st.get("albums", [])
+        if not isinstance(albums, list):
+            albums = []
 
-        # 收集所有有效图片
-        entries: list[dict[str, Any]] = []
-        for entry in images:
-            e = _normalize_image_entry(entry)
-            if not e["fid"]:
+        # 收集所有 (fid, tags) 对
+        entries: list[tuple[str, str]] = []
+        for album in albums:
+            if not isinstance(album, dict):
                 continue
-            src = _pool_file_path(e["fid"])
-            if not os.path.isfile(src):
-                continue
-            entries.append(e)
+            tags = str(album.get("tags") or "")
+            for img in album.get("images", []):
+                if not isinstance(img, dict):
+                    continue
+                fid = img.get("fid")
+                if isinstance(fid, str) and _valid_file_id(fid):
+                    src = _pool_file_path(fid)
+                    if os.path.isfile(src):
+                        entries.append((fid, tags))
 
         total = len(entries)
         if total == 0:
@@ -558,17 +640,14 @@ def register() -> None:
         await _write_ndjson_line(resp, {"type": "progress", "phase": "export", "current": 0, "total": total})
         saved: list[dict[str, Any]] = []
         exported = 0
-        for idx, entry in enumerate(entries, 1):
-            src = _pool_file_path(entry["fid"])
+        for idx, (fid, tags) in enumerate(entries, 1):
+            src = _pool_file_path(fid)
             png_path = os.path.join(datasets_root(), f"{idx}.png")
             txt_path = os.path.join(datasets_root(), f"{idx}.txt")
             try:
                 shutil.copy2(src, png_path)
-                outfit = entry["outfit"]
-                scene = entry.get("scene", "")
-                txt_body = f"{outfit}, {scene}" if scene else outfit
                 with open(txt_path, "w", encoding="utf-8") as f:
-                    f.write(txt_body)
+                    f.write(tags)
             except OSError as e:
                 await _write_ndjson_line(
                     resp,
@@ -590,7 +669,7 @@ def register() -> None:
         await resp.write_eof()
         return resp
 
-    # --- Bridge 暂存（保留，用于 Workflow 集成） ---
+    # ── Bridge 暂存 ──
 
     @server.routes.options("/bridge/dataset/bridge-stash")
     async def _opt_stash(_request: web.Request) -> web.Response:
@@ -663,11 +742,13 @@ def register() -> None:
             fid = _save_image_file(png)
             if not fid:
                 continue
-            imgs = st.setdefault("images", [])
-            if not isinstance(imgs, list):
-                imgs = []
-                st["images"] = imgs
-            imgs.append({"fid": fid, "outfit": "", "scene": ""})
+            albums = st.setdefault("albums", [])
+            if not isinstance(albums, list):
+                albums = []
+                st["albums"] = albums
+            # 每个暂存图创建一个新 album
+            aid = uuid.uuid4().hex
+            albums.append({"aid": aid, "tags": "", "images": [{"fid": fid}]})
             imported += 1
             await _write_ndjson_line(
                 resp, {"type": "progress", "phase": "import", "current": imported, "total": cnt}
@@ -686,7 +767,6 @@ def register() -> None:
     # 保留旧接口（GET pool image）用于兼容旧引用，返回 404
     @server.routes.get("/bridge/dataset/pool/gallery/{file_id}/image")
     async def _old_pool_image(request: web.Request) -> web.Response:
-        # 重定向到新接口
         fid = request.match_info.get("file_id", "")
         if not _valid_file_id(fid):
             return _json({"error": "bad file_id"}, status=400)

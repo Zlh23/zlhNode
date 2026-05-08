@@ -37,6 +37,7 @@ class ZLH_AddonPreferences(AddonPreferences):
         box.label(text="Ctrl+Shift+B：渲染并上传（outfit 为可见物体名）")
         box.label(text="  - 弹出对话框选择模式：单张 / 全部组合 / 随机 N 种")
         box.label(text="Ctrl+Shift+O：修改选中物体的名称，并设置 removable 标记", icon="OBJECT_DATA")
+        box.label(text="Ctrl+Shift+Q：GPU 加速遮挡分析（Eevee 深度图推断遮挡关系）", icon="RENDER_STILL")
         box.label(text="若快捷键冲突，请手动在上述键位映射中改为其它按键", icon="ERROR")
         box.separator()
         row = box.row()

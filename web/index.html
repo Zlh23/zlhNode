@@ -22,7 +22,9 @@
           />
         </div>
         <nav class="toolbar-cluster toolbar-cluster--compact" aria-label="数据集操作">
+          <button type="button" id="btnBatchRun" class="btn-solid btn-solid--text">跑图</button>
           <button type="button" id="btnExport" class="btn-solid btn-solid--text">导出</button>
+          <button type="button" id="btnTrash" class="btn-ghost btn-ghost--text">回收站</button>
           <button type="button" id="btnClear" class="btn-ghost btn-ghost--risk btn-ghost--text">清空</button>
         </nav>
         <div class="toolbar-cluster toolbar-cluster--import">
@@ -36,41 +38,111 @@
           <div id="jobProgressFill" class="job-progress-fill"></div>
         </div>
       </div>
+      <!-- 批量跑图弹窗 -->
+      <div id="batchRunBackdrop" class="modal-backdrop batch-run-backdrop hidden" role="dialog" aria-modal="true" aria-label="批量跑图">
+        <div class="batch-run-panel" id="batchRunPanel">
+          <div class="batch-run-head">
+            <span class="batch-run-title">批量跑图</span>
+            <button type="button" id="batchRunClose" class="image-edit-close">关闭</button>
+          </div>
+          <div class="batch-run-body">
+            <div class="batch-run-section">
+              <span class="batch-run-section-label">选择工作流</span>
+              <div class="batch-run-workflow-row">
+                <select id="batchRunWorkflowSelect" class="batch-run-select"></select>
+                <button type="button" id="batchRunRefreshWorkflows" class="btn-inline" title="刷新工作流列表">↻</button>
+              </div>
+              <span id="batchRunAlbumCount" class="batch-run-hint"></span>
+            </div>
+            <div class="batch-run-progress-area" id="batchRunProgressArea">
+              <div class="batch-run-progress-bar-track">
+                <div id="batchRunProgressFill" class="batch-run-progress-fill"></div>
+              </div>
+              <span id="batchRunStatus" class="batch-run-status"></span>
+            </div>
+          </div>
+          <div class="batch-run-foot">
+            <button type="button" id="batchBtnRun" class="btn-solid btn-solid--text batch-run-btn">跑图</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 回收站弹窗 -->
+      <div id="trashBackdrop" class="modal-backdrop trash-backdrop hidden" role="dialog" aria-modal="true" aria-label="回收站">
+        <div class="trash-panel" id="trashPanel">
+          <div class="trash-head">
+            <span class="trash-title">回收站</span>
+            <span id="trashHint" class="trash-hint">刷新页面后清空</span>
+            <button type="button" id="trashClose" class="image-edit-close">关闭</button>
+          </div>
+          <div class="trash-body" id="trashBody">
+            <div class="trash-empty" id="trashEmpty">回收站为空</div>
+            <div id="trashList" class="trash-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 标签筛选栏 -->
+      <div id="tagFilterBar" class="tag-filter-bar"></div>
       <div id="homeGrid" class="dataset-home-grid"></div>
     </main>
 
-    <!-- 编辑面板 -->
+    <!-- 图册详情弹窗 -->
     <div
-      id="imageEditBackdrop"
-      class="modal-backdrop image-edit-backdrop hidden"
+      id="albumDetailBackdrop"
+      class="modal-backdrop album-detail-backdrop hidden"
       role="dialog"
       aria-modal="true"
-      aria-label="编辑图片"
+      aria-label="图册详情"
     >
-      <div class="image-edit-panel" id="imageEditPanel">
-        <div class="image-edit-head">
-          <span class="image-edit-title">编辑图片</span>
-          <button type="button" id="imageEditClose" class="image-edit-close">关闭</button>
+      <div class="album-detail-panel" id="albumDetailPanel">
+        <div class="album-detail-head">
+          <span class="album-detail-title">图册</span>
+          <button type="button" id="albumDetailClose" class="image-edit-close">关闭</button>
         </div>
-        <div class="image-edit-body">
-          <div class="image-edit-preview-area">
-            <img id="imageEditImg" class="image-edit-img hidden" alt="" />
-            <p id="imageEditEmpty" class="image-edit-empty hidden">请选择一张图片</p>
+
+        <div class="album-detail-body">
+          <!-- 画廊区域 -->
+          <div class="album-detail-gallery-area">
+            <div class="album-detail-gallery-viewport" id="galleryViewport">
+              <div class="album-detail-gallery-track" id="galleryTrack"></div>
+              <!-- 左右箭头 -->
+              <button type="button" class="album-detail-arrow album-detail-arrow--left" id="galleryArrowLeft" aria-label="上一张">‹</button>
+              <button type="button" class="album-detail-arrow album-detail-arrow--right" id="galleryArrowRight" aria-label="下一张">›</button>
+            </div>
+            <div class="album-detail-counter" id="galleryCounter">0 / 0</div>
           </div>
-          <div class="image-edit-form">
+
+          <!-- 标签编辑 -->
+          <div class="album-detail-tags-area">
             <label class="image-edit-label">
-              <span class="image-edit-label-text">outfit</span>
-              <input id="imageEditOutfit" type="text" class="image-edit-input" spellcheck="false" />
-            </label>
-            <label class="image-edit-label">
-              <span class="image-edit-label-text">scene</span>
-              <textarea id="imageEditScene" class="image-edit-textarea" rows="3" spellcheck="false"></textarea>
+              <span class="image-edit-label-text">标签（标注文件内容）</span>
+              <textarea id="albumTagsInput" class="album-detail-tags-input" rows="3" spellcheck="false" placeholder="此图集的标注内容，每张子图导出时共用此标签"></textarea>
             </label>
           </div>
-        </div>
-        <div class="image-edit-actions">
-          <button type="button" id="imageEditDelete" class="btn-ghost btn-ghost--risk btn-ghost--text">删除</button>
-          <button type="button" id="imageEditSave" class="btn-solid btn-solid--text">保存</button>
+
+          <!-- 操作栏 -->
+          <div class="album-detail-actions">
+            <div class="album-detail-action-group">
+              <span class="image-edit-label-text">导入子图</span>
+              <input type="file" id="albumFileInput" hidden accept="image/*" multiple />
+              <button type="button" id="albumBtnUpload" class="btn-inline btn-inline--accent">本地上传</button>
+            </div>
+
+            <div class="album-detail-action-group">
+              <span class="image-edit-label-text">Web Bridge 跑图</span>
+              <div class="album-detail-bridge-row">
+                <select id="albumWorkflowSelect" class="album-detail-select"></select>
+                <button type="button" id="albumBtnRefreshWorkflows" class="btn-inline" title="刷新工作流列表">↻</button>
+                <button type="button" id="albumBtnRunBridge" class="btn-solid btn-solid--text">跑图</button>
+              </div>
+              <span id="albumBridgeStatus" class="album-detail-bridge-status muted"></span>
+            </div>
+
+            <div class="album-detail-action-group">
+              <button type="button" id="albumBtnDeleteAlbum" class="btn-ghost btn-ghost--risk btn-ghost--text">删除此图册</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

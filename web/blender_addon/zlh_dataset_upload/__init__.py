@@ -21,8 +21,8 @@ bl_info = {
     "author": "zlhNode",
     "version": (1, 13, 5),
     "blender": (5, 1, 0),
-    "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O）",
-    "description": "渲染当前相机、修改物体名称（自动过滤视锥体内物体）、分配到网页格子",
+    "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O / Ctrl+Shift+Q）",
+    "description": "渲染当前相机、修改物体名称（自动过滤视锥体内物体）、GPU 加速遮挡分析",
     "category": "Render",
     "tracker_url": "https://github.com/Zlh23/zlhNode/releases",
 }
@@ -38,6 +38,7 @@ def _load_modules():
     from . import render_ops           # noqa: F401
     from . import preferences          # noqa: F401
     from . import operators            # noqa: F401
+    from . import gpu_occlusion        # noqa: F401
 
 
 REGISTER_CLASSES = []
@@ -47,11 +48,13 @@ def _collect_classes():
     """收集所有需要注册的 Blender 类。放在函数内延迟执行，避免模块加载时冲突。"""
     from .preferences import ZLH_AddonPreferences
     from .operators import ZLH_OT_SetObjectNames, ZLH_OT_RenderUpload, ZLH_OT_CheckUpdate
+    from .gpu_occlusion import ZLH_OT_GPUOcclusionAnalysis
     return (
         ZLH_AddonPreferences,
         ZLH_OT_SetObjectNames,
         ZLH_OT_RenderUpload,
         ZLH_OT_CheckUpdate,
+        ZLH_OT_GPUOcclusionAnalysis,
     )
 
 
@@ -89,6 +92,10 @@ def register():
             km2 = kc.keymaps.new(name="Window", space_type="EMPTY", region_type="WINDOW")
             kmi2 = km2.keymap_items.new("zlh.set_object_names", "O", "PRESS", ctrl=True, shift=True)
             addon_keymaps.append((km2, kmi2))
+
+            km3 = kc.keymaps.new(name="Window", space_type="EMPTY", region_type="WINDOW")
+            kmi3 = km3.keymap_items.new("zlh.gpu_occlusion_analysis", "Q", "PRESS", ctrl=True, shift=True)
+            addon_keymaps.append((km3, kmi3))
 
 
 def unregister():

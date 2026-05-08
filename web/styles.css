@@ -604,3 +604,661 @@ body.theme-minimal {
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(0, 0, 0, 0.2);
 }
+
+/* ===================== 图册网格 ===================== */
+
+.theme-minimal .album-grid-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 4px 2px 8px;
+}
+
+.theme-minimal .album-card {
+  position: relative;
+  width: 140px;
+  height: 140px;
+  flex-shrink: 0;
+  border: 2px solid var(--zlh-border);
+  border-radius: var(--zlh-radius-sm);
+  background: rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.12s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.theme-minimal .album-card:hover {
+  border-color: rgba(96, 165, 250, 0.5);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), 0 0 20px rgba(59, 130, 246, 0.15);
+  transform: translateY(-2px);
+}
+
+.theme-minimal .album-card img {
+  display: block;
+  width: 140px;
+  height: 140px;
+  object-fit: contain;
+}
+
+.theme-minimal .album-card-count {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 3;
+  padding: 2px 7px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.65);
+  border-radius: 4px;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ===================== 图册详情弹窗 ===================== */
+
+.theme-minimal .album-detail-backdrop {
+  z-index: 1200;
+  background: rgba(2, 4, 10, 0.88);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.theme-minimal .album-detail-panel {
+  width: min(660px, 100%);
+  max-height: min(92vh, 860px);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--zlh-radius);
+  border: 1px solid var(--zlh-border-strong);
+  background: rgba(12, 14, 22, 0.98);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.58);
+  overflow: hidden;
+}
+
+.theme-minimal .album-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.theme-minimal .album-detail-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.theme-minimal .album-detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── 画廊 ── */
+
+.theme-minimal .album-detail-gallery-area {
+  position: relative;
+}
+
+.theme-minimal .album-detail-gallery-viewport {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 260px;
+  max-height: 420px;
+  border-radius: var(--zlh-radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: radial-gradient(ellipse at center, rgba(30, 42, 72, 0.3) 0%, #05070e 75%);
+  overflow: hidden;
+}
+
+.theme-minimal .album-detail-gallery-track {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  width: 100%;
+  height: 100%;
+  scrollbar-width: none;
+}
+
+.theme-minimal .album-detail-gallery-track::-webkit-scrollbar {
+  display: none;
+}
+
+.theme-minimal .album-detail-slide {
+  flex: 0 0 100%;
+  scroll-snap-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+  position: relative;
+}
+
+.theme-minimal .album-detail-slide img {
+  max-width: 100%;
+  max-height: 380px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--zlh-radius-sm);
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.theme-minimal .album-detail-slide-delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 0.85rem;
+  font-weight: 700;
+  line-height: 26px;
+  cursor: pointer;
+  transition: background 0.12s;
+  opacity: 0;
+}
+
+.theme-minimal .album-detail-slide:hover .album-detail-slide-delete {
+  opacity: 1;
+}
+
+.theme-minimal .album-detail-slide-delete:hover {
+  background: rgba(127, 29, 29, 0.9);
+}
+
+.theme-minimal .album-detail-empty-gallery {
+  padding: 40px;
+  font-size: 0.875rem;
+  color: rgba(255, 255, 255, 0.3);
+  text-align: center;
+}
+
+/* ── 左右箭头 ── */
+
+.theme-minimal .album-detail-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 10;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 1.4rem;
+  font-weight: 300;
+  line-height: 36px;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.theme-minimal .album-detail-arrow:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.theme-minimal .album-detail-arrow--left {
+  left: 8px;
+}
+
+.theme-minimal .album-detail-arrow--right {
+  right: 8px;
+}
+
+.theme-minimal .album-detail-counter {
+  text-align: center;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.4);
+  margin-top: 6px;
+  letter-spacing: 0.04em;
+}
+
+/* ── 标签编辑 ── */
+
+.theme-minimal .album-detail-tags-area {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.theme-minimal .album-detail-tags-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--zlh-border);
+  border-radius: var(--zlh-radius-sm);
+  background: rgba(0, 0, 0, 0.28);
+  color: inherit;
+  font-size: 0.8125rem;
+  min-height: 60px;
+  resize: vertical;
+  transition: border-color 0.15s;
+}
+
+.theme-minimal .album-detail-tags-input:focus {
+  outline: none;
+  border-color: rgba(96, 165, 250, 0.45);
+}
+
+/* ── 操作栏 ── */
+
+.theme-minimal .album-detail-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.theme-minimal .album-detail-action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.theme-minimal .album-detail-bridge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-minimal .album-detail-select {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--zlh-border);
+  border-radius: var(--zlh-radius-sm);
+  background: rgba(0, 0, 0, 0.28);
+  color: inherit;
+  font-size: 0.8125rem;
+}
+
+.theme-minimal .album-detail-select:focus {
+  outline: none;
+  border-color: rgba(96, 165, 250, 0.45);
+}
+
+.theme-minimal .album-detail-bridge-status {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.4);
+  min-height: 1.1rem;
+}
+
+.theme-minimal .album-detail-bridge-status:empty {
+  display: none;
+}
+
+.theme-minimal .muted {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* ===================== 标签筛选栏 ===================== */
+
+.theme-minimal .tag-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 16px;
+  margin-bottom: 4px;
+}
+
+.theme-minimal .tag-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: 1px solid var(--zlh-border);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.theme-minimal .tag-filter-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--zlh-border-strong);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.theme-minimal .tag-filter-btn.is-active {
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(96, 165, 250, 0.5);
+  color: #93c5fd;
+}
+
+.theme-minimal .tag-filter-btn.is-active:hover {
+  background: rgba(59, 130, 246, 0.25);
+  border-color: rgba(96, 165, 250, 0.65);
+}
+
+.theme-minimal .tag-filter-btn.is-excluded {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fca5a5;
+  text-decoration: line-through;
+}
+
+.theme-minimal .tag-filter-btn.is-excluded:hover {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: rgba(248, 113, 113, 0.6);
+}
+
+.theme-minimal .tag-filter-btn .tag-filter-count {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.3);
+  transition: color 0.12s;
+}
+
+.theme-minimal .tag-filter-btn.is-active .tag-filter-count {
+  color: rgba(147, 197, 253, 0.6);
+}
+
+/* ===================== 批量跑图弹窗 ===================== */
+
+.theme-minimal .batch-run-backdrop {
+  z-index: 1300;
+  background: rgba(2, 4, 10, 0.88);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.theme-minimal .batch-run-panel {
+  width: min(520px, 100%);
+  max-height: min(90vh, 800px);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--zlh-radius);
+  border: 1px solid var(--zlh-border-strong);
+  background: rgba(12, 14, 22, 0.98);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.58);
+  overflow: hidden;
+}
+
+.theme-minimal .batch-run-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.theme-minimal .batch-run-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.theme-minimal .batch-run-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.theme-minimal .batch-run-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.theme-minimal .batch-run-section-label {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.theme-minimal .batch-run-select-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.theme-minimal .batch-run-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--zlh-border);
+  border-radius: var(--zlh-radius-sm);
+  background: rgba(0, 0, 0, 0.28);
+  color: inherit;
+  font-size: 0.8125rem;
+}
+
+.theme-minimal .batch-run-select[multiple] {
+  min-height: 200px;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.theme-minimal .batch-run-select[multiple] option {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.theme-minimal .batch-run-select[multiple] option:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.theme-minimal .batch-run-select[multiple] option:checked {
+  background: rgba(59, 130, 246, 0.25);
+  color: #93c5fd;
+}
+
+.theme-minimal .batch-run-hint {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.4);
+  min-height: 1.1rem;
+}
+
+.theme-minimal .batch-run-workflow-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-minimal .batch-run-workflow-row .batch-run-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.theme-minimal .batch-run-progress-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+}
+
+.theme-minimal .batch-run-progress-bar-track {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+  border-radius: 2px;
+}
+
+.theme-minimal .batch-run-progress-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #2563eb, #60a5fa);
+  transition: width 0.2s ease-out;
+}
+
+.theme-minimal .batch-run-status {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.5);
+  min-height: 1.2rem;
+  word-break: break-all;
+}
+
+.theme-minimal .batch-run-status:empty {
+  display: none;
+}
+
+.theme-minimal .batch-run-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.theme-minimal .batch-run-btn {
+  min-width: 100px;
+}
+
+/* ===================== 回收站弹窗 ===================== */
+
+.theme-minimal .trash-backdrop {
+  z-index: 1300;
+  background: rgba(2, 4, 10, 0.88);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.theme-minimal .trash-panel {
+  width: min(520px, 100%);
+  max-height: min(90vh, 800px);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--zlh-radius);
+  border: 1px solid var(--zlh-border-strong);
+  background: rgba(12, 14, 22, 0.98);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.58);
+  overflow: hidden;
+}
+
+.theme-minimal .trash-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.theme-minimal .trash-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.theme-minimal .trash-hint {
+  flex: 1;
+  font-size: 0.6875rem;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.theme-minimal .trash-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 18px;
+}
+
+.theme-minimal .trash-empty {
+  padding: 40px;
+  text-align: center;
+  font-size: 0.875rem;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.theme-minimal .trash-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.theme-minimal .trash-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--zlh-border);
+  border-radius: var(--zlh-radius-sm);
+  background: rgba(255, 255, 255, 0.03);
+  transition: background 0.12s;
+}
+
+.theme-minimal .trash-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.theme-minimal .trash-item-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.theme-minimal .trash-item-label {
+  font-size: 0.8125rem;
+  color: rgba(255, 255, 255, 0.78);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.theme-minimal .trash-item-preview {
+  font-size: 0.6875rem;
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.theme-minimal .trash-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.theme-minimal .trash-restore-btn {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.75rem;
+}
+
+.theme-minimal .trash-discard-btn {
+  min-height: 32px;
+  padding: 0 8px;
+  font-size: 0.75rem;
+}
