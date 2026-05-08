@@ -43,7 +43,7 @@ def _save_render_state(scene) -> dict:
         "engine": render.engine,
         "resolution_percentage": render.resolution_percentage,
         "use_pass_object_index": vl.use_pass_object_index,
-        "use_nodes": scene.use_nodes,
+        "use_compositing": render.use_compositing,
     }
 
 
@@ -53,30 +53,24 @@ def _restore_render_state(scene, state: dict):
     render.engine = state["engine"]
     render.resolution_percentage = state["resolution_percentage"]
     vl.use_pass_object_index = state["use_pass_object_index"]
-
-    if not state["use_nodes"]:
-        if scene.node_tree:
-            scene.node_tree.nodes.clear()
-        scene.use_nodes = False
-    else:
-        scene.use_nodes = True
+    render.use_compositing = state["use_compositing"]
 
 
 def _get_scene_node_tree(scene):
-    """安全获取 scene 的 Compositor 节点树。"""
-    scene.use_nodes = True
-    # Blender 5.1 中 use_nodes=True 后 node_tree 可能仍未创建
-    tree = scene.node_tree
+    """安全获取 scene 的 Compositor 节点树。
+
+    Blender 5.x API:
+      - Scene.compositing_node_group (替代已废弃的 Scene.node_tree)
+      - Scene.render.use_compositing (替代已废弃的 Scene.use_nodes)
+    """
+    scene.render.use_compositing = True
+    tree = scene.compositing_node_group
     if tree is not None:
         return tree
-    # 手动查找或创建
-    for ng in bpy.data.node_groups:
-        if ng.name == f"CompositingNodeTree_{scene.name}":
-            return ng
-    # 强制触发一次 use_nodes 切换来创建
-    scene.use_nodes = False
-    scene.use_nodes = True
-    tree = scene.node_tree
+    # 第一次可能为 None，再触发一次
+    scene.render.use_compositing = False
+    scene.render.use_compositing = True
+    tree = scene.compositing_node_group
     if tree is not None:
         return tree
     raise RuntimeError("无法创建场景的 Compositor 节点树")
