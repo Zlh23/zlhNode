@@ -171,7 +171,7 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
             return {"CANCELLED"}
         base = _normalize_base(_prefs(context).api_base)
         if not base.startswith(("http://", "https://")):
-            self.report({"ERROR}", "API 根地址需以 http:// 或 https:// 开头")
+            self.report({"ERROR"}, "API 根地址需以 http:// 或 https:// 开头")
             return {"CANCELLED"}
 
         # 检测当前相机是否为球形随机相机
