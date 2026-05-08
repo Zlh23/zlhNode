@@ -216,7 +216,7 @@ def _infer_combinations_from_depth(
             d = depth_rm_list[i]
             if d is None:
                 continue
-            obj_pixels = (d > 1e-6) & (np.abs(d - canvas) < 1e-5)
+            obj_pixels = (d > 1e-6) & (d < depth_nonrem * 0.999) & (np.abs(d - canvas) < 1e-4)
             if obj_pixels.any():
                 current_visible.add(idx_to_rm_name[i])
 
