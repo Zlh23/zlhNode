@@ -549,7 +549,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
             self._cleanup(context)
 
-            context.scene["zlh_gpu_occlusion_result"] = result
             self._phase = "done"
             _log(f"[gpu_occlusion] 分析完成: {len(result.get('effective_combinations', []))} 种有效组合")
             return context.window_manager.invoke_props_dialog(self, width=700)
@@ -561,7 +560,7 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
     def draw(self, context):
         layout = self.layout
-        r = context.scene.get("zlh_gpu_occlusion_result", {})
+        r = self._result
         if not r:
             layout.label(text="无分析结果", icon="ERROR")
             return
