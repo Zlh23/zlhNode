@@ -16,10 +16,69 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import bpy
 import numpy as np
+from mathutils import Vector
 
 from . import _log
 
 RENDER_RESOLUTION_PERCENT = 100
+
+
+# ════════════════════════════════════════════════════════════
+# 视锥体裁剪
+# ════════════════════════════════════════════════════════════
+
+def _build_frustum_planes(scene):
+    """构建相机视锥体 6 个平面 (normal, d)，法线指向内部。"""
+    cam = scene.camera
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    cs = cam.data.clip_start
+    ce = cam.data.clip_end
+
+    eval_cam = cam.evaluated_get(depsgraph)
+    eval_cam_matrix = eval_cam.matrix_world
+    cam_pos = eval_cam_matrix.translation
+    cam_dir = eval_cam_matrix.to_quaternion() @ Vector((0, 0, -1))
+
+    frame = cam.data.view_frame(scene=scene)
+    near_corners = [eval_cam_matrix @ Vector((p.x, p.y, p.z)) for p in frame]
+    far_corners = [p + cam_dir * (ce - cs) for p in near_corners]
+    near_center = sum(near_corners, Vector()) / 4
+
+    def _plane(a, b, c):
+        n = (b - a).cross(c - a).normalized()
+        return n, -n.dot(a)
+
+    # Near plane
+    n_near, d_near = _plane(near_corners[0], near_corners[1], near_corners[2])
+    if n_near.dot(near_center - cam_pos) < 0:
+        n_near, d_near = -n_near, -d_near
+
+    # Far plane
+    n_far, d_far = _plane(far_corners[0], far_corners[2], far_corners[1])
+    if n_far.dot(near_center - (near_center + cam_dir * (ce - cs))) < 0:
+        n_far, d_far = -n_far, -d_far
+
+    # Side planes
+    sides = []
+    for i in range(4):
+        j = (i + 1) % 4
+        n, d = _plane(cam_pos, near_corners[i], near_corners[j])
+        if n.dot(near_center) + d < 0:
+            n, d = -n, -d
+        sides.append((n, d))
+
+    return [*sides, (n_near, d_near), (n_far, d_far)]
+
+
+def _aabb_in_frustum(frustum_planes, min_c, max_c):
+    """AABB 是否与视锥体相交。"""
+    for n, d in frustum_planes:
+        px = max_c.x if n.x >= 0 else min_c.x
+        py = max_c.y if n.y >= 0 else min_c.y
+        pz = max_c.z if n.z >= 0 else min_c.z
+        if n.dot(Vector((px, py, pz))) + d < 0:
+            return False
+    return True
 
 
 def _save_render_state(scene) -> dict:
@@ -203,24 +262,32 @@ def _infer_combinations_from_depth(
 
     _log(f"[gpu_occlusion] 开始枚举 {total} 种组合")
 
+    # 过滤远裁面背景像素：depth > 0.99 视为"不存在"
+    # 同时预计算每个 removable 的真实像素 mask
+    base_real = depth_nonrem < 0.99
+    rm_real_mask = []
+    for i in range(n_rem):
+        d = depth_rm_list[i]
+        if d is not None:
+            rm_real_mask.append((d > 1e-6) & (d < 0.99))
+        else:
+            rm_real_mask.append(None)
+
     for mask in range(1, total):
         canvas = depth_nonrem.copy()
-        for i in range(n_rem):
-            if (mask >> i) & 1:
-                d = depth_rm_list[i]
-                if d is not None:
-                    canvas = np.minimum(canvas, d)
-
         current_visible = base_visible_names.copy()
         for i in range(n_rem):
             if not ((mask >> i) & 1):
-                continue  # 不在当前 mask 中 → 不可见
-            d = depth_rm_list[i]
-            if d is None:
                 continue
-            obj_pixels = (d > 1e-6) & (d < depth_nonrem * 0.999) & (np.abs(d - canvas) < 1e-4)
-            if obj_pixels.any():
+            d = depth_rm_list[i]
+            real = rm_real_mask[i]
+            if d is None or real is None:
+                continue
+            # 物体真实像素所在区域，是否比叠加前画布更浅
+            added = real & (d < canvas)
+            if added.any():
                 current_visible.add(idx_to_rm_name[i])
+                canvas = np.minimum(canvas, d)
 
         sig = tuple(sorted(current_visible))
         if sig not in seen_signatures:
@@ -358,7 +425,11 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
         _log("[gpu_occlusion] ===== 开始基于深度图的遮挡分析 =====")
 
-        # 1. 收集所有可见 MESH
+        # 1. 收集场景中所有可见 MESH，并做视锥体 AABB 粗筛
+        _log("[gpu_occlusion] 构建视锥体...")
+        frustum_planes = _build_frustum_planes(scene)
+        _log(f"[gpu_occlusion] 视锥体 6 平面构建完成")
+
         all_meshes: List[bpy.types.Object] = []
         for obj in scene.objects:
             try:
@@ -366,11 +437,30 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
                     continue
                 if obj.hide_get() or not obj.visible_get():
                     continue
-                all_meshes.append(obj)
+                # 视锥体 AABB 粗筛
+                bbox = obj.bound_box
+                if not bbox:
+                    continue
+                world_mat = obj.matrix_world
+                corners_world = [world_mat @ Vector(p) for p in bbox]
+                min_c = Vector((
+                    min(p.x for p in corners_world),
+                    min(p.y for p in corners_world),
+                    min(p.z for p in corners_world),
+                ))
+                max_c = Vector((
+                    max(p.x for p in corners_world),
+                    max(p.y for p in corners_world),
+                    max(p.z for p in corners_world),
+                ))
+                if _aabb_in_frustum(frustum_planes, min_c, max_c):
+                    all_meshes.append(obj)
+                else:
+                    _log(f"[gpu_occlusion]   跳过 {obj.name}（不在视锥体内）")
             except Exception as e:
                 _log(f"[gpu_occlusion] 收集物体异常 ({obj.name}): {e}")
 
-        _log(f"[gpu_occlusion] 可见 MESH 数量: {len(all_meshes)}")
+        _log(f"[gpu_occlusion] 视锥体内 MESH 数量: {len(all_meshes)}")
         if not all_meshes:
             self.report({"ERROR"}, "场景中无可见 MESH 物体")
             return {"CANCELLED"}
