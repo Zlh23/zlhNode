@@ -79,11 +79,10 @@ def _create_compositor_node_tree(scene) -> bpy.types.NodeTree:
     _log(f"[gpu_occlusion] 创建成功: {tree}")
     scene.compositing_node_group = tree
     _log(f"[gpu_occlusion] 已赋值到 scene.compositing_node_group")
-    if "Image" not in [s.name for s in tree.interface.items()]:
-        tree.interface.new_socket(
-            name="Image", in_out="OUTPUT", socket_type="NodeSocketColor",
-        )
-        _log(f"[gpu_occlusion] 已创建 Image output socket")
+    tree.interface.new_socket(
+        name="Image", in_out="OUTPUT", socket_type="NodeSocketColor",
+    )
+    _log(f"[gpu_occlusion] 已创建 Image output socket")
     scene.render.use_compositing = True
     _log(f"[gpu_occlusion] render.use_compositing = True")
     return tree
@@ -96,12 +95,6 @@ def _reset_compositor_for_indexob(scene):
         tree = _create_compositor_node_tree(scene)
     else:
         scene.render.use_compositing = True
-
-    # 确保 interface 上有 Image output socket
-    if "Image" not in [s.name for s in tree.interface.items()]:
-        tree.interface.new_socket(
-            name="Image", in_out="OUTPUT", socket_type="NodeSocketColor",
-        )
 
     # 清除已有节点（保留 interface）
     for n in list(tree.nodes):
