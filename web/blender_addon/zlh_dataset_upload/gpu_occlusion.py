@@ -552,7 +552,28 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         self._cleanup(context)
 
         _log(f"[gpu_occlusion] 分析完成: {len(result.get('effective_combinations', []))} 种有效组合")
-        context.window_manager.invoke_props_dialog(self, width=700)
+
+        # 打印结果摘要到控制台
+        _log(f"[gpu_occlusion] ===== 有效组合 ===== ")
+        for i, combo in enumerate(result.get("effective_combinations", [])):
+            visible = combo.get("visible", [])
+            _log(f"  {i + 1}. mask={combo.get('mask', 0)}: {', '.join(visible) if visible else '（空）'}")
+
+        # 延迟一帧弹对话框，避免在 modal 中调用 invoke_props_dialog
+        self._dialog_scheduled = True
+        bpy.app.timers.register(self._delayed_dialog, first_interval=0.01)
+
+    _dialog_scheduled = False
+
+    def _delayed_dialog(self):
+        """延迟弹出的结果对话框。"""
+        try:
+            wm = bpy.context.window_manager
+            if wm:
+                wm.invoke_props_dialog(self, width=700)
+        except Exception:
+            pass
+        return None  # 只执行一次
 
     def draw(self, context):
         layout = self.layout
