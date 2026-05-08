@@ -167,91 +167,60 @@ def _infer_combinations_from_depth(
 ) -> dict:
     """从深度图推断有效组合。
 
-    从基准深度开始，逐个叠加 removable 物体的深度图。
-    如果某物体在某像素上比当前画布浅，则它在当前画布上是可见的。
+    对所有 2^n 种 mask 做纯 numpy 推断（不渲染），每种 mask 计算其画布深度
+    = min(depth_base, depth_rm[k] for k in mask)，然后判断每个物体是否可见。
 
-    返回与之前相同格式的 result dict。
+    虽然仍是 2^n 次循环，但每次只是 O(W*H) 的 numpy 数组操作，没有渲染开销。
     """
-    _log("[gpu_occlusion] ===== 开始 CPU 深度推断有效组合 =====")
+    _log(f"[gpu_occlusion] ===== 开始 CPU 深度推断有效组合 =====")
 
-    current_depth = depth_nonrem.copy()
     base_visible_names = set(non_removable_names)
+    n_rem = len(removable_names)
+    total = 1 << n_rem
 
-    # 对 removable 按平均深度排序（近到远）
-    rm_mean_depths: List[Tuple[str, float]] = []
-    for name in removable_names:
-        d = depth_rm.get(name)
-        if d is None:
-            continue
-        mask = d > 0
-        if mask.any():
-            rm_mean_depths.append((name, float(d[mask].mean())))
-        else:
-            rm_mean_depths.append((name, float("inf")))
-    rm_mean_depths.sort(key=lambda x: x[1])
+    # 预计算每个物体的深度图数组
+    depth_rm_list: List[Optional[np.ndarray]] = [depth_rm.get(name) for name in removable_names]
 
-    # 收集全场景可见物体
-    depth_full = depth_nonrem.copy()
-    for name, d in depth_rm.items():
-        if d is None:
-            continue
-        depth_full = np.minimum(depth_full, d)
-    all_visible_names: Set[str] = set()
-    for pid, name in index_to_name.items():
-        if name in non_removable_names:
-            all_visible_names.add(name)
-        elif name in removable_names:
-            dd = np.minimum(depth_nonrem, depth_rm.get(name, depth_nonrem))
-            if (dd < current_depth).any() or (depth_rm.get(name, np.zeros_like(current_depth)) > 0).any():
-                all_visible_names.add(name)
+    # 构建 index <-> name 映射
+    rm_name_to_idx = {name: i for i, name in enumerate(removable_names)}
+    idx_to_rm_name = {i: name for i, name in enumerate(removable_names)}
 
-    # 逐层叠加
     seen_signatures: Set[Tuple[str, ...]] = set()
     effective_list: List[Tuple[int, Set[str]]] = []
 
     # 初始：仅 non-removable
-    sig0 = tuple(sorted(base_visible_names))
-    seen_signatures.add(sig0)
-    effective_list.append((0, base_visible_names.copy()))
-    _log(f"[gpu_occlusion] 基准组合: visible={sorted(base_visible_names)}")
+    base_visible_sig = tuple(sorted(base_visible_names))
+    if base_visible_sig not in seen_signatures:
+        seen_signatures.add(base_visible_sig)
+        effective_list.append((0, base_visible_names.copy()))
 
-    # 对每个 priority mask（1 << i），对应 removable_names[i] 是否可见
-    n_rem = len(removable_names)
-    # 建立 name -> index 映射
-    name_to_idx = {name: i for i, name in enumerate(removable_names)}
+    _log(f"[gpu_occlusion] 开始枚举 {total} 种组合（纯 CPU numpy 比较）")
 
-    # 逐个叠加 removable
-    for name, _mean_d in rm_mean_depths:
-        d_rm = depth_rm.get(name)
-        if d_rm is None:
-            continue
+    for mask in range(1, total):
+        # 计算当前 mask 的画布深度
+        canvas = depth_nonrem.copy()
+        for i in range(n_rem):
+            if (mask >> i) & 1:
+                d = depth_rm_list[i]
+                if d is not None:
+                    canvas = np.minimum(canvas, d)
 
-        # 检查：该物体是否有像素比当前画布浅
-        deeper_mask = d_rm < current_depth
-        if deeper_mask.any():
-            # 这个物体可见，更新画布
-            current_depth = np.minimum(current_depth, d_rm)
-            # 构建当前可见集：base + 所有比当前画布浅的 removable
-            current_visible = base_visible_names.copy()
-            for other_name, other_d in depth_rm.items():
-                if other_d is None:
-                    continue
-                if (other_d < current_depth).any():
-                    current_visible.add(other_name)
-                else:
-                    # 检查该物体自身是否有任何非零深度像素（即它本体出现了）
-                    if (other_d > 0).any():
-                        current_visible.add(other_name)
-            sig = tuple(sorted(current_visible))
-            if sig not in seen_signatures:
-                seen_signatures.add(sig)
-                # mask：每个 removable 的位置
-                mask = 0
-                for i, rm_name in enumerate(removable_names):
-                    if rm_name in current_visible:
-                        mask |= (1 << i)
-                effective_list.append((mask, current_visible))
-                _log(f"[gpu_occlusion] 组合 mask={mask}: 新增有效组合 → {sorted(current_visible)}")
+        # 判断每个物体是否可见
+        current_visible = base_visible_names.copy()
+        for i in range(n_rem):
+            d = depth_rm_list[i]
+            if d is None:
+                continue
+            # 如果该物体在任何像素上深度 <= 画布深度（即它出现了）
+            # 注意：物体自身的深度图在该物体的像素上应该 <= 画布深度
+            if (d <= canvas).any() and (d > 0).any():
+                current_visible.add(idx_to_rm_name[i])
+
+        sig = tuple(sorted(current_visible))
+        if sig not in seen_signatures:
+            seen_signatures.add(sig)
+            effective_list.append((mask, current_visible))
+            _log(f"[gpu_occlusion] 组合 mask={mask}: 新增有效组合 → {sorted(current_visible)}")
 
     _log(f"[gpu_occlusion] 深度推断完成: {len(effective_list)} 种有效组合")
 
@@ -266,13 +235,20 @@ def _infer_combinations_from_depth(
         "all_objects": [o.name for o in all_meshes],
         "removable_names": removable_names,
         "non_removable_names": non_removable_names,
-        "all_visible": sorted(all_visible_names),
+        "all_visible": [
+            name for name in sorted(index_to_name.values())
+            if name in base_visible_names or any(
+                depth_rm.get(name) is not None
+                and (depth_rm[name] <= canvas).any()
+                and (depth_rm[name] > 0).any()
+            )
+        ],
         "effective_combinations": [
             {"mask": m, "visible": sorted(v)}
             for m, v in effective_list
         ],
         "count": len(effective_list),
-        "total_theoretical": 1 << n_rem,
+        "total_theoretical": total,
         "frequency": dict(freq.most_common()),
     }
 
