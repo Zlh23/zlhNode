@@ -2,6 +2,7 @@
 
 渲染当前激活相机视图，过滤视锥体内物体名字后提交到网页格子。
 支持 removable 标签的遮挡分析组合枚举。
+支持球形随机相机的辅助线和随机移动。
 """
 
 import datetime
@@ -19,10 +20,10 @@ def _log(msg: str):
 bl_info = {
     "name": "zlh 数据集渲染上传",
     "author": "zlhNode",
-    "version": (0, 0, 132),
+    "version": (0, 0, 133),
     "blender": (5, 1, 0),
     "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O / Ctrl+Shift+Q）",
-    "description": "渲染当前相机、修改物体名称（自动过滤视锥体内物体）、GPU 加速遮挡分析",
+    "description": "渲染上传、球形随机相机、物体重命名",
     "category": "Render",
     "tracker_url": "https://github.com/Zlh23/zlhNode/releases",
 }
@@ -39,6 +40,7 @@ def _load_modules():
     from . import preferences          # noqa: F401
     from . import operators            # noqa: F401
     from . import gpu_occlusion        # noqa: F401
+    from . import sphere_camera        # noqa: F401
 
 
 REGISTER_CLASSES = []
@@ -47,13 +49,21 @@ REGISTER_CLASSES = []
 def _collect_classes():
     """收集所有需要注册的 Blender 类。放在函数内延迟执行，避免模块加载时冲突。"""
     from .preferences import ZLH_AddonPreferences
-    from .operators import ZLH_OT_SetObjectNames, ZLH_OT_RenderUpload, ZLH_OT_CheckUpdate
+    from .operators import (
+        ZLH_OT_SetObjectNames,
+        ZLH_OT_RenderUpload,
+        ZLH_OT_CheckUpdate,
+        ZLH_OT_SphereCameraPreview,
+        ZLH_OT_SphereCameraRandomize,
+    )
     from .gpu_occlusion import ZLH_OT_GPUOcclusionAnalysis
     return (
         ZLH_AddonPreferences,
         ZLH_OT_SetObjectNames,
         ZLH_OT_RenderUpload,
         ZLH_OT_CheckUpdate,
+        ZLH_OT_SphereCameraPreview,
+        ZLH_OT_SphereCameraRandomize,
         ZLH_OT_GPUOcclusionAnalysis,
     )
 
@@ -70,6 +80,9 @@ def register():
 
     from .preferences import _register_object_removable
     _register_object_removable()
+
+    from .sphere_camera import _register_sphere_camera_props
+    _register_sphere_camera_props()
 
     # 注册场景属性（保留但不再用于自动填充，仅用于兼容旧版本）
     bpy.types.Scene.zlh_render_object_names = StringProperty(
@@ -94,7 +107,7 @@ def register():
             addon_keymaps.append((km2, kmi2))
 
             km3 = kc.keymaps.new(name="Window", space_type="EMPTY", region_type="WINDOW")
-            kmi3 = km3.keymap_items.new("zlh.gpu_occlusion_analysis", "Q", "PRESS", ctrl=True, shift=True)
+            kmi3 = km3.keymap_items.new("zlh.sphere_camera_randomize", "Q", "PRESS", ctrl=True, shift=True)
             addon_keymaps.append((km3, kmi3))
 
 
@@ -109,6 +122,17 @@ def unregister():
 
     from .preferences import _unregister_object_removable
     _unregister_object_removable()
+
+    from .sphere_camera import _unregister_sphere_camera_props
+    _unregister_sphere_camera_props()
+
+    from .sphere_camera import _remove_sphere_visualization
+    try:
+        scene = bpy.context.scene
+        _remove_sphere_visualization(scene)
+    except Exception:
+        pass
+
     try:
         del bpy.types.Scene.zlh_render_object_names
     except AttributeError:
