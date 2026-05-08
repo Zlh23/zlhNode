@@ -21,13 +21,12 @@
 
 import os
 import tempfile
-import time as _time
 from typing import Dict, List, Optional, Set, Tuple
 
 import bpy
 import numpy as np
 
-from . import _log, VERSION_STR
+from . import _log
 
 # ── 渲染参数 ──────────────────────────────────────────────
 RENDER_RESOLUTION_PERCENT = 100
@@ -58,38 +57,73 @@ def _restore_render_state(scene, state: dict):
     render.use_compositing = state["use_compositing"]
 
 
-def _get_scene_node_tree(scene):
-    """安全获取 scene 的 Compositor 节点树。
+# ════════════════════════════════════════════════════════════
+# Blender 5.x Compositor 节点树管理
+# ════════════════════════════════════════════════════════════
+#
+# Blender 5.x API 变更：
+#   - Scene.node_tree → Scene.compositing_node_group
+#   - Scene.use_nodes → Scene.render.use_compositing（已废弃）
+#   - 节点树需要手动创建并通过 bpy.data.node_groups.new() 创建
+#
+# 当场景从未进入过 Compositor 时，compositing_node_group 为 None，
+# 需要用 bpy.data.node_groups.new(type='CompositorNodeTree') 创建。
 
-    Blender 5.x API:
-      - Scene.compositing_node_group (替代已废弃的 Scene.node_tree)
-      - Scene.render.use_compositing (替代已废弃的 Scene.use_nodes)
-    """
-    render = scene.render
-    render.use_compositing = True
-    tree = scene.compositing_node_group
-    if tree is not None:
-        return tree
-    render.use_compositing = False
-    render.use_compositing = True
-    tree = scene.compositing_node_group
-    if tree is not None:
-        return tree
-    raise RuntimeError("无法创建场景的 Compositor 节点树")
+def _create_compositor_node_tree(scene) -> bpy.types.NodeTree:
+    """为场景创建并分配一个 Compositor 节点树。"""
+    tree = bpy.data.node_groups.new(
+        name=f"CompositorNodeTree_{scene.name}",
+        type="CompositorNodeTree",
+    )
+    scene.compositing_node_group = tree
+    # 确保输出 socket 存在
+    if "Image" not in tree.interface:
+        tree.interface.new_socket(
+            name="Image", in_out="OUTPUT", socket_type="NodeSocketColor",
+        )
+    scene.render.use_compositing = True
+    return tree
 
 
 def _reset_compositor_for_indexob(scene):
-    """设置 Compositor 为 IndexOB → Viewer Node。"""
-    tree = _get_scene_node_tree(scene)
+    """设置 Compositor 为 IndexOB → Viewer Node。
+
+    Blender 5.x 中需要：
+      - GroupOutput 节点作为树输出
+      - interface.output socket 注册输出插槽
+      - 连接 RLayers.IndexOB → Viewer.input
+    """
+    tree = scene.compositing_node_group
+    if tree is None:
+        tree = _create_compositor_node_tree(scene)
+    else:
+        scene.render.use_compositing = True
+
+    # 清除已有节点
     for n in list(tree.nodes):
         tree.nodes.remove(n)
 
+    # Render Layers 节点
     rl = tree.nodes.new(type="CompositorNodeRLayers")
     rl.location = (0, 0)
+
+    # Viewer 节点（用于读取渲染结果）
     viewer = tree.nodes.new(type="CompositorNodeViewer")
     viewer.location = (300, 0)
     viewer.name = "zlh_viewer"
 
+    # GroupOutput 节点（Blender 5.x 必须）
+    output = tree.nodes.new(type="NodeGroupOutput")
+    output.location = (600, 0)
+
+    # 连接 Image（保证 Compositor 正常输出）
+    try:
+        tree.links.new(rl.outputs["Image"], viewer.inputs[0])
+        tree.links.new(rl.outputs["Image"], output.inputs["Image"])
+    except Exception:
+        pass
+
+    # 再把 IndexOB 连到 Viewer（覆盖 Image，使 Viewer 显示 Index 数据）
     try:
         tree.links.new(rl.outputs["IndexOB"], viewer.inputs[0])
     except KeyError:
@@ -97,6 +131,7 @@ def _reset_compositor_for_indexob(scene):
             if "Index" in out.name or "index" in out.name:
                 tree.links.new(out, viewer.inputs[0])
                 break
+
     tree.update_tag()
 
 
@@ -133,7 +168,6 @@ def _read_indexob_from_file(filepath: str) -> Optional[np.ndarray]:
 
     w, h = img.size
     pix = np.array(img.pixels[:], dtype=np.float32).reshape(h, w, 4)
-    # 只留下第一个通道
     return np.round(pix[:, :, 0]).astype(np.int32)
 
 
@@ -142,10 +176,7 @@ def _read_indexob_from_file(filepath: str) -> Optional[np.ndarray]:
 # ════════════════════════════════════════════════════════════
 
 def _prepare_enumeration(context) -> Optional[dict]:
-    """枚举前的准备工作：收集物体、分配 pass_index、设置场景。
-
-    返回包含所有上下文信息的 dict，如果准备失败返回 None（带 error 信息）。
-    """
+    """枚举前的准备工作：收集物体、分配 pass_index、设置场景。"""
     scene = context.scene
     cam = scene.camera
     if cam is None:
@@ -227,6 +258,10 @@ def _prepare_enumeration(context) -> Optional[dict]:
     }
 
 
+# ════════════════════════════════════════════════════════════
+# Operator
+# ════════════════════════════════════════════════════════════
+
 class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
     """GPU 加速遮挡分析：枚举 removable 各子集，记录实际可见物体"""
     bl_idname = "zlh.gpu_occlusion_analysis"
@@ -237,6 +272,12 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
     _state: dict = {}
     _timer = None
     _temp_dir: str = ""
+    _mask: int = 0
+    _n_rem: int = 0
+    _removable: list = []
+    _all_visible_set: set = set()
+    _seen_signatures: set = set()
+    _effective_list: list = []
 
     # ── 分析结果 ──
     _result: dict = {}
@@ -280,7 +321,7 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         _log("[gpu_occlusion] 场景状态已恢复")
 
     def _render_one_combo(self, context) -> Optional[str]:
-        """渲染当前组合的一张 IndexOB，返回唯一文件名（不含路径），失败返回 None。"""
+        """渲染当前组合的一张 IndexOB，返回文件名，失败返回 None。"""
         scene = context.scene
         fname = f"zlh_idx_{self._mask:04d}.png"
         filepath = os.path.join(self._temp_dir, fname)
@@ -291,14 +332,11 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
     def _analyze_frame(self, context) -> bool:
         """解析当前帧的渲染结果，更新有效组合列表。返回 True 表示成功。"""
-        scene = context.scene
-        state = self._state
-
         fname = self._render_one_combo(context)
         if fname is None:
             _log(f"  组合 mask={self._mask}: 渲染失败，跳过")
             self._mask += 1
-            return True  # 跳过，继续下一步
+            return True
 
         filepath = os.path.join(self._temp_dir, fname)
         idx_map = _read_indexob_from_file(filepath)
@@ -307,7 +345,7 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             self._mask += 1
             return True
 
-        index_to_name = state["index_to_name"]
+        index_to_name = self._state["index_to_name"]
 
         actually_visible: Set[str] = set()
         for pid, name in index_to_name.items():
@@ -332,8 +370,10 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         self._result = {}
         self._temp_dir = ""
         self._timer = None
+        self._mask = 0
+        self._seen_signatures = set()
+        self._effective_list = []
 
-        # 准备工作
         state = _prepare_enumeration(context)
         if state is None or "error" in (state or {}):
             err = (state or {}).get("error", "未知错误")
@@ -342,6 +382,8 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             return {"CANCELLED"}
 
         self._state = state
+        self._removable = state["removable"]
+        self._n_rem = state["n_rem"]
 
         total_combo = state["total_combo"]
         _log(f"[operator] 开始模态 GPU 遮挡分析，共 {total_combo} 种组合")
@@ -359,8 +401,7 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         self._temp_dir = tempfile.mkdtemp(prefix="zlh_gpu_occlusion_")
 
         # 渲染全场景
-        fname_full = "zlh_idx_full.png"
-        full_path = os.path.join(self._temp_dir, fname_full)
+        full_path = os.path.join(self._temp_dir, "zlh_idx_full.png")
         ok = _render_indexob_to_file(scene, full_path)
         if not ok:
             self._cleanup(context)
@@ -380,14 +421,10 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
         _log(f"[gpu_occlusion] 全场景可见物体 = {len(all_visible_set)} 个")
         self._all_visible_set = all_visible_set
-        self._removable = state["removable"]
-        self._n_rem = state["n_rem"]
-        self._mask = 0
-        self._seen_signatures: Set[Tuple[str, ...]] = set()
-        self._effective_list: List[Tuple[int, Set[str]]] = []
 
         # 启动模态 timer
         wm = context.window_manager
+        wm.progress_begin(0, total_combo)
         self._timer = wm.event_timer_add(0.01, window=context.window)
         wm.modal_handler_add(self)
         return {"RUNNING_MODAL"}
@@ -401,7 +438,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             all_meshes = state["all_meshes"]
 
             if self._mask >= total_combo:
-                # 全部枚举完成
                 wm.progress_end()
                 if self._timer:
                     wm.event_timer_remove(self._timer)
@@ -409,7 +445,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
                 _log(f"[gpu_occlusion] 枚举完成: {len(self._effective_list)} / {total_combo} 种有效组合")
 
-                # 构建结果
                 from collections import Counter
                 removable = self._removable
                 non_removable = state["non_removable"]
@@ -434,7 +469,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
                 self._cleanup(context)
 
-                # 显示结果对话框
                 context.scene["zlh_gpu_occlusion_result"] = self._result
                 return context.window_manager.invoke_props_dialog(self, width=700)
 
@@ -450,10 +484,8 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             wm.progress_update(self._mask)
             self.report({"INFO"}, f"GPU 遮挡分析: {self._mask}/{total_combo}")
 
-            # 渲染并分析
             ok = self._analyze_frame(context)
             if not ok:
-                # 严重错误，终止
                 wm.progress_end()
                 if self._timer:
                     wm.event_timer_remove(self._timer)
@@ -488,18 +520,14 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         box.label(text=f"removable: {n_rem} 个物体", icon="OBJECT_DATA")
         box.label(text=f"非 removable: {len(non_removable)} 个", icon="SCENE_DATA")
         box.label(text=f"理论组合: {theoretical} 种", icon="MODIFIER")
-        box.label(
-            text=f"实际有效: {actual} 种 (节省 {saved} 次渲染, "
-                 f"{saved/theoretical*100:.1f}%)",
-            icon="SORT_ASC",
-        )
+        box.label(text=f"实际有效: {actual} 种 (节省 {saved} 次渲染, "
+                       f"{saved/theoretical*100:.1f}%)",
+                  icon="SORT_ASC")
 
         box0 = layout.box()
         box0.label(text=f"当前视角下可见物体 ({len(all_visible)} 个):", icon="VIEWZOOM")
-        box0.label(
-            text=f"    {', '.join(all_visible[:30])}"
-                 f"{'…' if len(all_visible) > 30 else ''}"
-        )
+        box0.label(text=f"    {', '.join(all_visible[:30])}"
+                        f"{'…' if len(all_visible) > 30 else ''}")
 
         if freq:
             box1 = layout.box()
@@ -511,9 +539,8 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         if combos:
             box2 = layout.box()
             n_show = min(20, len(combos))
-            box2.label(
-                text=f"有效组合（展示前 {n_show}/{len(combos)} 种）:", icon="RENDER_STILL"
-            )
+            box2.label(text=f"有效组合（展示前 {n_show}/{len(combos)} 种）:",
+                       icon="RENDER_STILL")
             for i, combo in enumerate(combos[:n_show]):
                 label = f"    {i + 1}. "
                 visible = combo.get("visible", [])
@@ -521,5 +548,4 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
                 box2.label(text=label)
 
     def execute(self, context):
-        """对话框确认后执行——什么都不做，结果已保存在 scene 中。"""
         return {"FINISHED"}
