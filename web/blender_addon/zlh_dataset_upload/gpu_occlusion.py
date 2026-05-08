@@ -2,8 +2,8 @@
 
 核心思路：
   渲染一张图，通过 Object Index pass 精确知道哪些物体实际出现在渲染结果中。
-  这比视锥体裁剪更精确，因为考虑了遮挡关系：
-  - 被其他物体完全挡住（屏幕上看不到任何像素）的物体，不会出现在 IndexOB 结果中
+  - 使用 EXR 格式保存（避免 PNG 8-bit 精度丢失）
+  - 直接从 Render Result 读取 IndexOB 通道
 
 用法：Blender 中按 Ctrl+Shift+Q 触发
 """
@@ -11,8 +11,7 @@
 import os
 import tempfile
 import traceback
-from collections import Counter
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 import bpy
 import numpy as np
@@ -89,7 +88,9 @@ def _save_render_state(scene) -> dict:
         "engine": render.engine,
         "resolution_percentage": render.resolution_percentage,
         "use_pass_object_index": vl.use_pass_object_index,
-        "use_compositing": render.use_compositing,
+        "file_format": render.image_settings.file_format,
+        "color_depth": render.image_settings.color_depth,
+        "use_antialiasing": render.use_antialiasing,
     }
 
 
@@ -99,78 +100,22 @@ def _restore_render_state(scene, state: dict):
     render.engine = state["engine"]
     render.resolution_percentage = state["resolution_percentage"]
     vl.use_pass_object_index = state["use_pass_object_index"]
-    render.use_compositing = state["use_compositing"]
+    render.image_settings.file_format = state["file_format"]
+    render.image_settings.color_depth = state["color_depth"]
+    render.use_antialiasing = state["use_antialiasing"]
 
 
-def _create_compositor_node_tree(scene):
-    _log(f"[gpu_occlusion] 创建 Compositor 节点树 (scene={scene.name})")
-    tree = bpy.data.node_groups.new(
-        name=f"CompositorNodeTree_{scene.name}",
-        type="CompositorNodeTree",
-    )
-    scene.compositing_node_group = tree
-    tree.interface.new_socket(name="Image", in_out="OUTPUT", socket_type="NodeSocketColor")
-    scene.render.use_compositing = True
-    _log(f"[gpu_occlusion] Compositor 节点树创建完成")
-    return tree
-
-
-def _reset_compositor_for_indexob(scene):
-    """设置 Compositor: RLayers.IndexOB -> Viewer，用于读取 Object Index。"""
-    _log(f"[gpu_occlusion] 设置 Compositor: RLayers.IndexOB -> Viewer")
-    tree = scene.compositing_node_group
-    if tree is None:
-        _log(f"[gpu_occlusion] compositing_node_group 为 None，需要创建")
-        tree = _create_compositor_node_tree(scene)
-    else:
-        scene.render.use_compositing = True
-
-    _log(f"[gpu_occlusion] 清除旧节点")
-    for n in list(tree.nodes):
-        tree.nodes.remove(n)
-
-    rl = tree.nodes.new(type="CompositorNodeRLayers")
-    rl.location = (0, 0)
-    _log(f"[gpu_occlusion] 创建 RenderLayers 节点完成")
-
-    viewer = tree.nodes.new(type="CompositorNodeViewer")
-    viewer.location = (300, 0)
-    viewer.name = "zlh_viewer"
-
-    output = tree.nodes.new(type="NodeGroupOutput")
-    output.location = (600, 0)
-
-    try:
-        tree.links.new(rl.outputs["Image"], output.inputs["Image"])
-        _log(f"[gpu_occlusion] Image -> GroupOutput 连接成功")
-    except Exception as e:
-        _log(f"[gpu_occlusion] Image -> GroupOutput 连接失败: {e}")
-
-    # 连接 IndexOB -> Viewer（注意：Blender 5.x 中 IndexOB 在 Color 类型输出中）
-    idx_connected = False
-    for out in rl.outputs:
-        if out.name == "IndexOB" or "indexob" in out.name.lower():
-            try:
-                tree.links.new(out, viewer.inputs[0])
-                idx_connected = True
-                _log(f"[gpu_occlusion] {out.name} -> Viewer 连接成功")
-                break
-            except Exception as e:
-                _log(f"[gpu_occlusion] 连接 {out.name} 失败: {e}")
-
-    if not idx_connected:
-        _log(f"[gpu_occlusion] 警告: 未找到 IndexOB 输出！可用 outputs: {[o.name for o in rl.outputs]}")
-
-    tree.update_tag()
-    _log(f"[gpu_occlusion] Compositor 设置完成")
-
-
-def _render_to_file(scene, filepath: str, label: str = "") -> bool:
-    """渲染场景到文件，使用当前场景的渲染设置。"""
-    _log(f"[gpu_occlusion] 渲染 {label}: {filepath}")
+def _render_to_exr(scene, filepath: str, label: str = "") -> bool:
+    """渲染场景到 EXR 文件（支持 32-bit 浮点，保留所有通道）。"""
+    _log(f"[gpu_occlusion] 渲染 EXR {label}: {filepath}")
     fp_orig = scene.render.filepath
     fmt_orig = scene.render.image_settings.file_format
-    scene.render.image_settings.file_format = "PNG"
+    depth_orig = scene.render.image_settings.color_depth
+    aa_orig = scene.render.use_antialiasing
+
+    scene.render.image_settings.file_format = "OPEN_EXR"
+    scene.render.image_settings.color_depth = "32"
+    scene.render.use_antialiasing = False
     try:
         scene.render.filepath = filepath
         _log(f"[gpu_occlusion]  调用 bpy.ops.render.render(write_still=True)")
@@ -185,11 +130,17 @@ def _render_to_file(scene, filepath: str, label: str = "") -> bool:
     finally:
         scene.render.filepath = fp_orig
         scene.render.image_settings.file_format = fmt_orig
+        scene.render.image_settings.color_depth = depth_orig
+        scene.render.use_antialiasing = aa_orig
 
 
-def _read_indexob_from_file(filepath: str, label: str = "") -> Optional[np.ndarray]:
-    """从 PNG 文件读取 IndexOB 数据（R 通道编码了 pass_index）。"""
-    _log(f"[gpu_occlusion] 读取 IndexOB {label}: {filepath}")
+def _read_indexob_from_exr(filepath: str, label: str = "") -> Optional[np.ndarray]:
+    """从 EXR 文件读取 IndexOB 数据。
+
+    EXR 格式的 pass_index 以 float32 直接存储，每个像素的值 = 物体 pass_index（float）。
+    背景像素 = 0。
+    """
+    _log(f"[gpu_occlusion] 读取 EXR IndexOB {label}: {filepath}")
     if not os.path.isfile(filepath):
         _log(f"[gpu_occlusion]  文件不存在: {filepath}")
         return None
@@ -197,7 +148,7 @@ def _read_indexob_from_file(filepath: str, label: str = "") -> Optional[np.ndarr
     try:
         img = bpy.data.images.load(filepath)
     except Exception as e:
-        _log(f"[gpu_occlusion]  加载 IndexOB 异常 {label}: {e}")
+        _log(f"[gpu_occlusion]  加载 EXR 异常 {label}: {e}")
         return None
 
     w, h = img.size
@@ -215,11 +166,10 @@ def _read_indexob_from_file(filepath: str, label: str = "") -> Optional[np.ndarr
     bpy.data.images.remove(img)
     _log(f"[gpu_occlusion]  图片资源已释放")
 
-    # IndexOB 的 pass_index 被编码在 R 通道中，值 = pass_index / 255.0
-    # 恢复为整数 pass_index
+    # EXR IndexOB 在 R 通道，值直接是 pass_index 的 float 值
     indexob = pix[:, :, 0]
-    _log(f"[gpu_occlusion]  IndexOB R 通道统计: min={indexob.min():.6f}, max={indexob.max():.6f}")
-
+    _log(f"[gpu_occlusion]  IndexOB R 通道: min={indexob.min():.6f}, max={indexob.max():.6f}, "
+         f"非零={(indexob > 0.5).sum()} 像素")
     return indexob
 
 
@@ -230,35 +180,46 @@ def _detect_visible_objects_from_indexob(
 ) -> dict:
     """从 IndexOB 数据中提取实际出现在渲染结果中的物体名。
 
-    背景像素的 pass_index = 0（没有物体），物体像素的 pass_index = 分配的值。
+    EXR 中 pass_index 是 float32，四舍五入到最近的整数。
+    背景像素 = 0，物体像素 > 0.5。
     """
     _log(f"[gpu_occlusion] ===== 从 IndexOB 检测可见物体 =====")
 
-    # 找出所有出现在渲染结果中的 pass_index
-    # 由于 PNG 编码精度问题，四舍五入到最近整数
-    present_indices = np.unique(np.round(indexob * 255).astype(np.int32))
-    present_indices = present_indices[present_indices > 0]  # 排除背景 (0)
+    # 过滤出物体像素（pass_index > 0.5），四舍五入取整
+    values = indexob[indexob > 0.5]
+    if len(values) == 0:
+        _log(f"[gpu_occlusion] 画面中没有物体像素（全部背景）")
+        return {
+            "all_objects": [o.name for o in all_meshes],
+            "visible_objects": [],
+            "visible_count": 0,
+            "invisible_objects": [o.name for o in all_meshes],
+        }
+
+    present_indices = set(np.round(values).astype(np.int32))
     _log(f"[gpu_occlusion] 渲染结果中出现的 pass_index: {sorted(present_indices)}")
 
-    # 映射回物体名
     visible_names: List[str] = []
-    for pid in present_indices:
+    for pid in sorted(present_indices):
         name = index_to_name.get(int(pid))
         if name:
             visible_names.append(name)
         else:
-            _log(f"[gpu_occlusion]  pass_index={pid} 无法映射到物体（可能未分配）")
+            _log(f"[gpu_occlusion]  pass_index={pid} 无法映射到物体")
 
-    _log(f"[gpu_occlusion] 画面中实际出现的物体 ({len(visible_names)} 个): {visible_names}")
+    invisible_names = [
+        o.name for o in all_meshes
+        if o.name not in visible_names
+    ]
+
+    _log(f"[gpu_occlusion] 画面中实际可见 ({len(visible_names)} 个): {visible_names}")
+    _log(f"[gpu_occlusion] 被遮挡/不可见 ({len(invisible_names)} 个): {invisible_names}")
 
     return {
         "all_objects": [o.name for o in all_meshes],
         "visible_objects": visible_names,
         "visible_count": len(visible_names),
-        "invisible_objects": [
-            o.name for o in all_meshes
-            if o.name not in visible_names
-        ],
+        "invisible_objects": invisible_names,
     }
 
 
@@ -302,7 +263,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         orig_hide = state.get("orig_hide", {})
         orig_render = state.get("orig_render")
         orig_pass = state.get("orig_pass", {})
-        orig_workspace = state.get("orig_workspace")
 
         _log(f"[gpu_occlusion] 恢复 {len(orig_hide)} 个物体的 hide_render")
         try:
@@ -326,15 +286,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
                 _log(f"[gpu_occlusion] 渲染状态已恢复")
             except Exception as e:
                 _log(f"[gpu_occlusion] 恢复渲染状态异常: {e}")
-
-        if orig_workspace and context.window:
-            try:
-                for ws in bpy.data.workspaces:
-                    if ws.name == orig_workspace:
-                        context.window.workspace = ws
-                        break
-            except Exception as e:
-                _log(f"[gpu_occlusion] 恢复 workspace 异常: {e}")
 
         try:
             context.view_layer.update()
@@ -366,7 +317,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         # 1. 收集场景中所有可见 MESH，做视锥体粗筛
         _log("[gpu_occlusion] 构建视锥体...")
         frustum_planes = _build_frustum_planes(scene)
-        _log(f"[gpu_occlusion] 视锥体 6 平面构建完成")
 
         all_meshes: List[bpy.types.Object] = []
         for obj in scene.objects:
@@ -402,13 +352,13 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             self.report({"ERROR"}, "场景中无可见 MESH 物体")
             return {"CANCELLED"}
 
-        # 2. 分配 pass_index
+        # 2. 分配 pass_index（从 1 开始，因为 0 = 背景）
         index_to_name: Dict[int, str] = {}
         for idx, obj in enumerate(all_meshes):
             pid = idx + 1
             obj.pass_index = pid
             index_to_name[pid] = obj.name
-        _log(f"[gpu_occlusion] pass_index 分配完成: {index_to_name}")
+        _log(f"[gpu_occlusion] pass_index 分配完成")
 
         # 3. 保存原始状态
         orig_render = _save_render_state(scene)
@@ -418,29 +368,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         orig_pass: Dict[str, int] = {}
         for obj in scene.objects:
             orig_pass[obj.name] = obj.pass_index
-        orig_workspace = context.window.workspace.name if context.window else None
-        _log(f"[gpu_occlusion] 原始状态已保存")
-
-        # 4. 设置 Eevee + 启用 IndexOB pass
-        scene.render.engine = (
-            "BLENDER_EEVEE_NEXT"
-            if hasattr(bpy.types, "BLENDER_EEVEE_NEXT")
-            else "BLENDER_EEVEE"
-        )
-        scene.render.resolution_percentage = RENDER_RESOLUTION_PERCENT
-        _log(f"[gpu_occlusion] 渲染引擎: {scene.render.engine}")
-
-        scene.view_layers[0].use_pass_object_index = True
-        _log(f"[gpu_occlusion] use_pass_object_index 已启用")
-
-        if context.window:
-            for ws in bpy.data.workspaces:
-                if ws.name == "Compositing":
-                    context.window.workspace = ws
-                    _log(f"[gpu_occlusion] 已切换到 Compositing workspace")
-                    break
-
-        _reset_compositor_for_indexob(scene)
 
         self._state = {
             "all_meshes": all_meshes,
@@ -448,11 +375,28 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             "orig_render": orig_render,
             "orig_hide": orig_hide,
             "orig_pass": orig_pass,
-            "orig_workspace": orig_workspace,
         }
         self._all_meshes = all_meshes
 
-        # 5. 创建临时目录，渲染一张图
+        # 4. 设置 Eevee + 启用 IndexOB pass
+        #    使用 EXR 32-bit 保存（保留精确的 pass_index 浮点值）
+        scene.render.engine = (
+            "BLENDER_EEVEE_NEXT"
+            if hasattr(bpy.types, "BLENDER_EEVEE_NEXT")
+            else "BLENDER_EEVEE"
+        )
+        scene.render.resolution_percentage = RENDER_RESOLUTION_PERCENT
+        scene.render.use_antialiasing = False
+
+        scene.view_layers[0].use_pass_object_index = True
+        _log(f"[gpu_occlusion] 渲染引擎: {scene.render.engine}, "
+             f"use_pass_object_index=True")
+
+        # 不需要 Compositor，EXR 直接保存所有渲染通道
+        # 禁用 Compositor 避免干扰
+        scene.render.use_compositing = False
+
+        # 5. 创建临时目录
         self._temp_dir = tempfile.mkdtemp(prefix="zlh_indexob_")
         _log(f"[gpu_occlusion] 临时目录: {self._temp_dir}")
 
@@ -460,7 +404,7 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         wm.progress_begin(0, 1)
 
         self._timer = wm.event_timer_add(0.01, window=context.window)
-        _log(f"[gpu_occlusion] 开始渲染 IndexOB 图")
+        _log(f"[gpu_occlusion] 开始渲染 IndexOB EXR")
         wm.modal_handler_add(self)
         return {"RUNNING_MODAL"}
 
@@ -472,15 +416,15 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         scene = context.scene
 
         try:
-            filepath = os.path.join(self._temp_dir, "indexob.png")
-            ok = _render_to_file(scene, filepath, "IndexOB")
+            filepath = os.path.join(self._temp_dir, "indexob.exr")
+            ok = _render_to_exr(scene, filepath, "IndexOB")
             if not ok:
                 wm.progress_end()
                 self._cleanup(context)
                 self.report({"ERROR"}, "IndexOB 渲染失败")
                 return {"CANCELLED"}
 
-            indexob = _read_indexob_from_file(filepath, "IndexOB")
+            indexob = _read_indexob_from_exr(filepath, "IndexOB")
             if indexob is None:
                 wm.progress_end()
                 self._cleanup(context)
@@ -495,15 +439,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             )
             self._result = result
             _log(f"[gpu_occlusion] 检测成功: {result['visible_count']} 个物体可见")
-
-            visible = result["visible_objects"]
-            invisible = result["invisible_objects"]
-            _log(f"[gpu_occlusion] ===== 可见物体 ({len(visible)} 个) =====")
-            for name in visible:
-                _log(f"  可见: {name}")
-            _log(f"[gpu_occlusion] ===== 被遮挡/不可见物体 ({len(invisible)} 个) =====")
-            for name in invisible:
-                _log(f"  不可见: {name}")
 
             self.report({"INFO"},
                         f"可见物体: {result['visible_count']}/{len(state['all_meshes'])} 个（详见控制台）")
