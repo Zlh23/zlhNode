@@ -127,16 +127,31 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
 
 
 class ZLH_OT_RenderUpload(bpy.types.Operator):
-    """渲染并上传：随机选择 removable 组合，IndexOB 检测实际可见物体"""
+    """渲染并上传：两层随机（视角 × tag），IndexOB 检测实际可见物体"""
     bl_idname = "zlh.render_upload"
     bl_label = "zlh: 渲染上传"
     bl_options = {"REGISTER"}
 
     _render_lock = threading.Lock()
 
-    random_count: bpy.props.IntProperty(
-        name="随机张数",
-        description="随机渲染的张数",
+    # 第一层：视角随机（仅当相机为球形随机相机时可用）
+    view_random_toggle: bpy.props.BoolProperty(
+        name="随机视角",
+        description="启用球形随机相机，每张渲染前随机相机位置",
+        default=False,
+    )
+    view_random_count: bpy.props.IntProperty(
+        name="视角随机次数",
+        description="随机移动相机 N 次，每次渲染 M 张 tag 组合",
+        default=2,
+        min=1,
+        max=64,
+    )
+
+    # 第二层：tag 随机
+    tag_random_count: bpy.props.IntProperty(
+        name="每视角 tag 张数",
+        description="每个视角下随机渲染的 tag 组合张数",
         default=4,
         min=1,
         max=128,
@@ -156,8 +171,12 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
             return {"CANCELLED"}
         base = _normalize_base(_prefs(context).api_base)
         if not base.startswith(("http://", "https://")):
-            self.report({"ERROR"}, "API 根地址需以 http:// 或 https:// 开头")
+            self.report({"ERROR}", "API 根地址需以 http:// 或 https:// 开头")
             return {"CANCELLED"}
+
+        # 检测当前相机是否为球形随机相机
+        cam = scene.camera
+        self._has_sphere_camera = bool(getattr(cam, "zlh_sphere_camera", False) and scene.zlh_sphere_anchor is not None)
 
         # 1. 视锥体检测所有 MESH
         _log("[invoke] 构建视锥体...")
@@ -209,20 +228,43 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
         self._removable_names = removable_names
         self._all_meshes_in_frustum = all_meshes
 
-        return context.window_manager.invoke_props_dialog(self, width=400)
+        return context.window_manager.invoke_props_dialog(self, width=460)
 
     def draw(self, context):
         layout = self.layout
         removable_names = getattr(self, "_removable_names", [])
-        layout.label(text=f"removable 物体: {len(removable_names)} 个", icon="OBJECT_DATA")
+        scene = context.scene
+        has_sphere = getattr(self, "_has_sphere_camera", False)
+
+        # 信息区
+        box_info = layout.box()
+        box_info.label(text=f"removable 物体: {len(removable_names)} 个", icon="OBJECT_DATA")
         for name in removable_names:
-            layout.label(text=f"  {name}")
-        layout.separator()
-        layout.prop(self, "random_count")
-        box = layout.box()
-        box.label(text="流程：随机选择可见子集 → 渲染 →", icon="RENDER_STILL")
-        box.label(text="      IndexOB 检测实际出现的物体 → 上传", icon="CHECKBOX_HLT")
-        box.label(text="确认后将开始渲染，是否继续？", icon="QUESTION")
+            box_info.label(text=f"  {name}")
+
+        # 视角随机（仅当球形相机可用时）
+        if has_sphere:
+            box_view = layout.box()
+            box_view.label(text="第一层：视角随机", icon="CAMERA_DATA")
+            box_view.prop(self, "view_random_toggle")
+            if self.view_random_toggle:
+                box_view.prop(self, "view_random_count")
+        else:
+            # 不可用时强制关闭
+            self.view_random_toggle = False
+
+        # tag 随机
+        box_tag = layout.box()
+        box_tag.label(text="第二层：tag 随机", icon="SHUFFLE")
+        box_tag.prop(self, "tag_random_count")
+
+        # 统计
+        view_n = self.view_random_count if (has_sphere and self.view_random_toggle) else 1
+        tag_n = self.tag_random_count
+        total = view_n * tag_n
+        box_total = layout.box()
+        box_total.label(text=f"共计渲染: {view_n} 视角 × {tag_n} tag = {total} 张", icon="RENDER_STILL")
+        box_total.label(text="确认后将开始渲染，是否继续？", icon="QUESTION")
 
     def execute(self, context):
         _log("[execute] 开始执行渲染流程")
@@ -251,123 +293,147 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
         removable_names = self._removable_names
         all_meshes = self._all_meshes_in_frustum
         n_rem = len(removable_names)
+        has_sphere = getattr(self, "_has_sphere_camera", False)
 
-        # 生成随机组合（mask: 第 i 位=1 表示 removable_names[i] 显示）
-        count = min(self.random_count, 1 << n_rem)
-        masks = list(range(1 << n_rem))
-        if len(masks) > count:
-            masks = random.sample(masks, count)
+        # 计算视角次数和每视角 tag 次数
+        if has_sphere and self.view_random_toggle:
+            view_count = self.view_random_count
+        else:
+            view_count = 1
+        tag_count = self.tag_random_count
 
-        _log(f"[execute] 随机 {count} 种组合，masks={masks}")
+        # 保存相机原始状态（用于视角随机）
+        orig_cam_location = scene.camera.location.copy()
+
+        _log(f"[execute] view_count={view_count} tag_count={tag_count} total={view_count * tag_count}")
 
         wm = context.window_manager
-        wm.progress_begin(0, count)
+        total = view_count * tag_count
+        wm.progress_begin(0, total)
 
         uploaded = 0
         errors = []
         try:
-            for idx, mask in enumerate(masks):
-                wm.progress_update(idx)
-                self.report({"INFO"}, f"渲染中… {idx + 1}/{count}")
-                _log(f"[execute] === 组合 {idx + 1}/{count} mask={mask} ===")
+            for vi in range(view_count):
+                # 视角随机：移动相机
+                if view_count > 1 and has_sphere:
+                    from .sphere_camera import _randomize_sphere_camera
+                    _randomize_sphere_camera(scene)
+                    _log(f"[execute]   视角 {vi + 1}/{view_count} 相机已随机移动")
 
-                # 哪些 removable 可见
-                visible_rem = set()
-                for i in range(n_rem):
-                    if (mask >> i) & 1:
-                        visible_rem.add(removable_names[i])
+                # 重置 pass_index（因为物体布局可能变化）
+                # 生成本视角的 tag 组合
+                masks = list(range(1 << n_rem))
+                if len(masks) > tag_count:
+                    masks = random.sample(masks, tag_count)
 
-                _log(f"[execute]  预定可见: {sorted(visible_rem)}")
+                for ti, mask in enumerate(masks):
+                    idx = vi * tag_count + ti
+                    wm.progress_update(idx)
+                    self.report({"INFO"}, f"渲染中… {idx + 1}/{total} (视角 {vi + 1}/{view_count})")
+                    _log(f"[execute] === 视角 {vi + 1}/{view_count} tag {ti + 1}/{tag_count} mask={mask} ===")
 
-                # 隐藏不需要的 removable
-                orig_hide = {}
-                for name in removable_names:
-                    obj = scene.objects.get(name)
-                    if obj:
-                        orig_hide[name] = obj.hide_render
-                        obj.hide_render = name not in visible_rem
+                    visible_rem = set()
+                    for i in range(n_rem):
+                        if (mask >> i) & 1:
+                            visible_rem.add(removable_names[i])
 
-                context.view_layer.update()
-
-                # 渲染图片
-                fname = None
-                try:
-                    fname = _render_to_file(context, output_dir)
-                    _log(f"[execute]  渲染完成: {fname}")
-                except Exception as e:
-                    _log(f"[execute]  渲染失败: {e}")
-                    errors.append(f"第 {idx + 1}/{count} 渲染失败: {e}")
+                    orig_hide = {}
                     for name in removable_names:
                         obj = scene.objects.get(name)
-                        if obj and name in orig_hide:
-                            obj.hide_render = orig_hide[name]
-                    continue
-                finally:
-                    for name in removable_names:
-                        obj = scene.objects.get(name)
-                        if obj and name in orig_hide:
-                            obj.hide_render = orig_hide[name]
+                        if obj:
+                            orig_hide[name] = obj.hide_render
+                            obj.hide_render = name not in visible_rem
 
-                # IndexOB 检测实际可见物体
-                # 构建需要传给检测函数的物体列表（包括不可移除的 + 预定可见的 removable）
-                all_mesh_objs_for_idx = []
-                for obj in all_meshes:
-                    if obj.name not in removable_names or obj.name in visible_rem:
-                        all_mesh_objs_for_idx.append(obj)
+                    context.view_layer.update()
 
-                try:
-                    idx_result = _run_indexob_detection(context, all_mesh_objs_for_idx)
-                    actual_visible = idx_result["visible_objects"]
-                    _log(f"[execute]  IndexOB 检测实际可见: {actual_visible}")
-                except Exception as e:
-                    _log(f"[execute]  IndexOB 检测失败: {e}")
-                    import traceback
-                    _log(traceback.format_exc())
-                    # 降级：用预定的可见物体
-                    all_visible = [o.name for o in all_meshes
-                                   if o.name not in removable_names or o.name in visible_rem]
-                    actual_visible = list(all_visible)
-
-                # 上传
-                names_str = ",".join(sorted(actual_visible))
-                try:
-                    from .http_util import _post_render_output
-                    data = _post_render_output(base, fname, names_str)
-                    if not data.get("ok"):
-                        raise RuntimeError(f"服务器返回错误: {data.get('error', 'unknown')}")
-                    uploaded += 1
-                    _log(f"[execute]  上传成功: outfit={names_str} file={fname}")
-                except urllib.error.HTTPError as e:
-                    err_text = ""
+                    fname = None
                     try:
-                        err_text = e.read().decode("utf-8", errors="replace")[:200]
-                    except Exception:
-                        pass
-                    msg = f"第 {idx + 1}/{count} 上传失败 HTTP {e.code} {err_text}"
-                    _log(f"[execute]  错误: {msg}")
-                    errors.append(msg)
-                    self.report({"WARNING"}, msg)
-                except urllib.error.URLError as e:
-                    msg = f"第 {idx + 1}/{count} 网络错误: {e.reason}"
-                    _log(f"[execute]  错误: {msg}")
-                    errors.append(msg)
-                    self.report({"WARNING"}, msg)
-                except Exception as e:
-                    msg = f"第 {idx + 1}/{count} 错误: {e}"
-                    _log(f"[execute]  错误: {msg}")
-                    import traceback
-                    _log(traceback.format_exc())
-                    errors.append(msg)
-                    self.report({"WARNING"}, msg)
+                        fname = _render_to_file(context, output_dir)
+                        _log(f"[execute]  渲染完成: {fname}")
+                    except Exception as e:
+                        _log(f"[execute]  渲染失败: {e}")
+                        errors.append(f"第 {idx + 1}/{total} 渲染失败: {e}")
+                        for name in removable_names:
+                            obj = scene.objects.get(name)
+                            if obj and name in orig_hide:
+                                obj.hide_render = orig_hide[name]
+                        continue
+                    finally:
+                        for name in removable_names:
+                            obj = scene.objects.get(name)
+                            if obj and name in orig_hide:
+                                obj.hide_render = orig_hide[name]
+
+                    # IndexOB 检测
+                    all_mesh_objs_for_idx = []
+                    for obj in all_meshes:
+                        if obj.name not in removable_names or obj.name in visible_rem:
+                            all_mesh_objs_for_idx.append(obj)
+
+                    try:
+                        idx_result = _run_indexob_detection(context, all_mesh_objs_for_idx)
+                        actual_visible = idx_result["visible_objects"]
+                        _log(f"[execute]  IndexOB 检测实际可见: {actual_visible}")
+                    except Exception as e:
+                        _log(f"[execute]  IndexOB 检测失败: {e}")
+                        import traceback
+                        _log(traceback.format_exc())
+                        all_visible = [o.name for o in all_meshes
+                                       if o.name not in removable_names or o.name in visible_rem]
+                        actual_visible = list(all_visible)
+
+                    names_str = ",".join(sorted(actual_visible))
+                    try:
+                        from .http_util import _post_render_output
+                        data = _post_render_output(base, fname, names_str)
+                        if not data.get("ok"):
+                            raise RuntimeError(f"服务器返回错误: {data.get('error', 'unknown')}")
+                        uploaded += 1
+                        _log(f"[execute]  上传成功: outfit={names_str} file={fname}")
+                    except urllib.error.HTTPError as e:
+                        err_text = ""
+                        try:
+                            err_text = e.read().decode("utf-8", errors="replace")[:200]
+                        except Exception:
+                            pass
+                        msg = f"第 {idx + 1}/{total} 上传失败 HTTP {e.code} {err_text}"
+                        _log(f"[execute]  错误: {msg}")
+                        errors.append(msg)
+                        self.report({"WARNING"}, msg)
+                    except urllib.error.URLError as e:
+                        msg = f"第 {idx + 1}/{total} 网络错误: {e.reason}"
+                        _log(f"[execute]  错误: {msg}")
+                        errors.append(msg)
+                        self.report({"WARNING"}, msg)
+                    except Exception as e:
+                        msg = f"第 {idx + 1}/{total} 错误: {e}"
+                        _log(f"[execute]  错误: {msg}")
+                        import traceback
+                        _log(traceback.format_exc())
+                        errors.append(msg)
+                        self.report({"WARNING"}, msg)
 
             wm.progress_end()
 
+            # 恢复相机位置
+            if view_count > 1 and has_sphere:
+                scene.camera.location = orig_cam_location
+                bpy.context.view_layer.update()
+
             if errors:
-                self.report({"WARNING"}, f"上传完成：成功 {uploaded}/{count}，{len(errors)} 个错误")
+                self.report({"WARNING"}, f"上传完成：成功 {uploaded}/{total}，{len(errors)} 个错误")
             else:
                 self.report({"INFO"}, f"全部上传完成：共 {uploaded} 张图片")
             return {"FINISHED"}
         finally:
+            # 确保相机恢复
+            if view_count > 1 and has_sphere:
+                try:
+                    scene.camera.location = orig_cam_location
+                    bpy.context.view_layer.update()
+                except Exception:
+                    pass
             ZLH_OT_RenderUpload._render_lock.release()
 
 
