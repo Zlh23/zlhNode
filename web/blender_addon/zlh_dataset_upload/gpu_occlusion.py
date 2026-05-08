@@ -62,10 +62,29 @@ def _restore_render_state(scene, state: dict):
         scene.use_nodes = True
 
 
-def _reset_compositor_for_indexob(scene):
-    """设置 Compositor（或清理后设置）为 IndexOB → Viewer Node。"""
+def _get_scene_node_tree(scene):
+    """安全获取 scene 的 Compositor 节点树。"""
+    scene.use_nodes = True
+    # Blender 5.1 中 use_nodes=True 后 node_tree 可能仍未创建
+    tree = scene.node_tree
+    if tree is not None:
+        return tree
+    # 手动查找或创建
+    for ng in bpy.data.node_groups:
+        if ng.name == f"CompositingNodeTree_{scene.name}":
+            return ng
+    # 强制触发一次 use_nodes 切换来创建
+    scene.use_nodes = False
     scene.use_nodes = True
     tree = scene.node_tree
+    if tree is not None:
+        return tree
+    raise RuntimeError("无法创建场景的 Compositor 节点树")
+
+
+def _reset_compositor_for_indexob(scene):
+    """设置 Compositor（或清理后设置）为 IndexOB → Viewer Node。"""
+    tree = _get_scene_node_tree(scene)
     for n in list(tree.nodes):
         tree.nodes.remove(n)
 

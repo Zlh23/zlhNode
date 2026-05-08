@@ -304,7 +304,7 @@ class ZLH_OT_CheckUpdate(bpy.types.Operator):
     bl_label = "检查更新"
     bl_options = {"REGISTER"}
 
-    _do_update: bpy.props.BoolProperty(default=False)
+    do_update: bpy.props.BoolProperty(default=False)
 
     def invoke(self, context, _event):
         try:
