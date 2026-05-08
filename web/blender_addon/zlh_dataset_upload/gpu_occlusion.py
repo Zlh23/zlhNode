@@ -4,7 +4,8 @@
   渲染 n+1 张深度图代替 2^n 次 IndexOB 渲染：
   - 1 张仅 non-removable 的基准深度图
   - n 张各 removable 单独深度图（仅该物体可见）
-  然后通过 numpy 比较深度值推断各组合的实际可见物体。
+  然后通过增量画布列表算法，逐一将每个 removable 尝试叠加到已有画布，
+  若深度图发生变化则产生新分支（该物体可见），否则不产生新分支。
 
 用法：Blender 中按 Ctrl+Shift+Q 触发
 """
@@ -233,10 +234,8 @@ def _infer_combinations_from_depth(
     _log(f"[gpu_occlusion] ===== 开始 CPU 深度推断有效组合 =====")
     _log(f"[gpu_occlusion] depth_nonrem shape={depth_nonrem.shape}, dtype={depth_nonrem.dtype}")
 
-    base_visible_names = set(non_removable_names)
+    base_visible = set(non_removable_names)
     n_rem = len(removable_names)
-    total = 1 << n_rem
-    _log(f"[gpu_occlusion] removable 数量={n_rem}, 理论组合={total}")
 
     # 检查 depth_rm 是否有缺失
     depth_rm_list: List[Optional[np.ndarray]] = []
@@ -252,58 +251,57 @@ def _infer_combinations_from_depth(
 
     idx_to_rm_name = {i: name for i, name in enumerate(removable_names)}
 
-    seen_signatures: Set[Tuple[str, ...]] = set()
-    effective_list: List[Tuple[int, Set[str]]] = []
+    _log(f"[gpu_occlusion] 开始增量构建画布列表")
+    # 画布列表中每个元素: (canvas, visible_set, mask)
+    # canvas: 该组合对应的深度图（叠加后的结果）
+    # visible: 该组合可见的物体名集合
+    # mask: 位掩码表示哪些 removable 存在于该组合中
+    canvases: List[Tuple[np.ndarray, Set[str], int]] = [
+        (depth_nonrem.copy(), base_visible.copy(), 0),
+    ]
 
-    base_sig = tuple(sorted(base_visible_names))
-    seen_signatures.add(base_sig)
-    effective_list.append((0, base_visible_names.copy()))
-    _log(f"[gpu_occlusion] 基准组合 (mask=0): visible={sorted(base_visible_names)}")
-
-    _log(f"[gpu_occlusion] 开始枚举 {total} 种组合")
-
-    # 过滤远裁面背景像素：depth > 0.99 视为"不存在"
-    # 同时预计算每个 removable 的真实像素 mask
-    base_real = depth_nonrem < 0.99
-    rm_real_mask = []
     for i in range(n_rem):
+        name = idx_to_rm_name[i]
         d = depth_rm_list[i]
-        if d is not None:
-            rm_real_mask.append((d > 1e-6) & (d < 0.99))
-        else:
-            rm_real_mask.append(None)
+        _log(f"[gpu_occlusion] 处理 removable[{i}]={name}: "
+             f"当前画布数量={len(canvases)}")
 
-    for mask in range(1, total):
-        canvas = depth_nonrem.copy()
-        current_visible = base_visible_names.copy()
-        for i in range(n_rem):
-            if not ((mask >> i) & 1):
-                continue
-            d = depth_rm_list[i]
-            real = rm_real_mask[i]
-            if d is None or real is None:
-                continue
-            # 物体真实像素所在区域，是否比叠加前画布更浅
-            added = real & (d < canvas)
-            if added.any():
-                current_visible.add(idx_to_rm_name[i])
-                canvas = np.minimum(canvas, d)
+        if d is None:
+            _log(f"[gpu_occlusion]  跳过（无深度数据）")
+            continue
 
-        sig = tuple(sorted(current_visible))
-        if sig not in seen_signatures:
-            seen_signatures.add(sig)
-            effective_list.append((mask, current_visible))
-            _log(f"[gpu_occlusion]  新增组合 mask={mask}: {sorted(current_visible)}")
+        new_entries: List[Tuple[np.ndarray, Set[str], int]] = []
 
-    _log(f"[gpu_occlusion] 推断完成: {len(effective_list)} 种有效组合")
+        for canvas, visible, mask in canvases:
+            # 尝试叠加：合并 d 到 canvas，每个像素取最近值（最小值）
+            merged = np.minimum(canvas, d)
+
+            # 判断 merged 是否与 canvas 有显著差异
+            # 背景像素 (d ≈ 1.0, canvas ≈ 1.0) 不做比较
+            diff_mask = (d > 1e-6) & (np.abs(merged - canvas) > 1e-6)
+
+            if diff_mask.any():
+                # 不一致 → 产生新分支: Rᵢ 在某些像素上比当前画布更近
+                new_visible = visible | {name}
+                new_mask = mask | (1 << i)
+                new_entries.append((merged, new_visible, new_mask))
+                _log(f"[gpu_occlusion]  组合 mask={new_mask}: 叠加 {name} 产生新分支, "
+                     f"visible={sorted(new_visible)}")
+            else:
+                _log(f"[gpu_occlusion]  组合 mask={mask}: 叠加 {name} 无变化，不分叉")
+
+        # 新增的分支加入列表（原有分支保持不变）
+        canvases.extend(new_entries)
+
+    _log(f"[gpu_occlusion] 增量构建完成: {len(canvases)} 种有效组合")
 
     from collections import Counter
     freq: Counter[str] = Counter()
-    for _mask, vis in effective_list:
-        for name in vis:
-            freq[name] += 1
+    for _c, vis, _m in canvases:
+        for n in vis:
+            freq[n] += 1
 
-    all_visible_set: Set[str] = set(base_visible_names)
+    all_visible_set: Set[str] = set(base_visible)
     for name in removable_names:
         d = depth_rm.get(name)
         if d is not None and (d > 0).any():
@@ -316,10 +314,10 @@ def _infer_combinations_from_depth(
         "all_visible": sorted(all_visible_set),
         "effective_combinations": [
             {"mask": m, "visible": sorted(v)}
-            for m, v in effective_list
+            for _c, v, m in canvases
         ],
-        "count": len(effective_list),
-        "total_theoretical": total,
+        "count": len(canvases),
+        "total_theoretical": 1 << n_rem,
         "frequency": dict(freq.most_common()),
     }
 
@@ -465,7 +463,7 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             self.report({"ERROR"}, "场景中无可见 MESH 物体")
             return {"CANCELLED"}
 
-        # 分配 pass_index
+        # 分配 pass_index (供后续可能的 IndexOB 备用)
         index_to_name: Dict[int, str] = {}
         for idx, obj in enumerate(all_meshes):
             pid = idx + 1
@@ -506,7 +504,8 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         orig_workspace = context.window.workspace.name if context.window else None
         _log(f"[gpu_occlusion] 原始状态已保存")
 
-        # 设置 Eevee + Compositor
+        # 设置 Eevee + 启用 Z pass
+        # 注意：不修改相机 clip_start/clip_end，完全使用当前相机配置
         scene.render.engine = (
             "BLENDER_EEVEE_NEXT"
             if hasattr(bpy.types, "BLENDER_EEVEE_NEXT")
@@ -516,7 +515,8 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         _log(f"[gpu_occlusion] 渲染引擎: {scene.render.engine}")
 
         scene.view_layers[0].use_pass_z = True
-        _log(f"[gpu_occlusion] use_pass_z 已启用")
+        _log(f"[gpu_occlusion] use_pass_z 已启用, "
+             f"相机 clip_start={cam.data.clip_start:.4f}, clip_end={cam.data.clip_end:.4f}")
 
         if context.window:
             for ws in bpy.data.workspaces:
