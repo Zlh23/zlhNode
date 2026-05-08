@@ -53,7 +53,6 @@ def _collect_classes():
         ZLH_OT_SetObjectNames,
         ZLH_OT_RenderUpload,
         ZLH_OT_CheckUpdate,
-        ZLH_OT_SphereCameraPreview,
         ZLH_OT_SphereCameraRandomize,
     )
     from .gpu_occlusion import ZLH_OT_GPUOcclusionAnalysis
@@ -62,7 +61,6 @@ def _collect_classes():
         ZLH_OT_SetObjectNames,
         ZLH_OT_RenderUpload,
         ZLH_OT_CheckUpdate,
-        ZLH_OT_SphereCameraPreview,
         ZLH_OT_SphereCameraRandomize,
         ZLH_OT_GPUOcclusionAnalysis,
     )

@@ -43,9 +43,8 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
             return {"CANCELLED"}
         self.new_name = obs[0].name
 
-        # 如果只选中了一个物体且它是相机 → 显示球形相机设置弹窗
+        # 如果只选中了相机 → 球形相机设置
         if len(obs) == 1 and obs[0].type == "CAMERA":
-            from .sphere_camera import _update_sphere_visualization
             self._is_camera = True
             wm = context.window_manager
             return wm.invoke_props_dialog(self, width=500)
@@ -57,27 +56,26 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
     def draw(self, context):
         layout = self.layout
         obs = context.selected_objects
+        scene = context.scene
 
-        # 单相机模式：显示球形相机设置
+        # 单相机模式：球形相机设置
         if getattr(self, "_is_camera", False) and len(obs) == 1 and obs[0].type == "CAMERA":
             cam = obs[0]
-            scene = context.scene
             layout.label(text=f"相机: {cam.name}", icon="CAMERA_DATA")
             layout.separator()
             row = layout.row()
             row.prop(cam, "zlh_sphere_camera", text="设为球形随机相机")
             if cam.zlh_sphere_camera:
                 box = layout.box()
-                box.label(text="球参数：", icon="SHADING_SPHERE")
-                box.prop(scene, "zlh_sphere_center_x", text="球心 X")
-                box.prop(scene, "zlh_sphere_center_y", text="球心 Y")
-                box.prop(scene, "zlh_sphere_center_z", text="球心 Z")
-                box.prop(scene, "zlh_sphere_radius", text="球半径")
-                box.label(text="说明：激活后会显示 3 个彩色圆环辅助线", icon="INFO")
-                box.label(text="Ctrl+Shift+Q 可在球面上随机移动相机", icon="VIEW_PAN")
-                # 预览按钮
-                row2 = layout.row()
-                row2.operator("zlh.sphere_camera_preview", text="更新辅助线预览", icon="SHADING_WIRE")
+                box.label(text="请选择一个物体作为锚点（球心）：", icon="SHADING_SPHERE")
+                box.template_ID(scene, "zlh_sphere_anchor", open="text.open")
+                if scene.zlh_sphere_anchor:
+                    anchor = scene.zlh_sphere_anchor
+                    radius = (cam.location - anchor.location).length
+                    box.label(text=f"锚点: {anchor.name}")
+                    box.label(text=f"半径: {radius:.3f}")
+                box.label(text="确认后显示球面辅助线", icon="INFO")
+                box.label(text="Ctrl+Shift+Q 随机移动并始终对准锚点", icon="VIEW_PAN")
             return
 
         # 普通物体模式
@@ -88,8 +86,6 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
             row = box.row()
             row.label(text=f"  {o.name}")
             row.prop(o, "zlh_removable", text="removable")
-            if o.type == "CAMERA":
-                row.prop(o, "zlh_sphere_camera", text="球形相机")
         box2 = layout.box()
         box2.label(text="提示：标记为 removable 的物体在渲染时会随机选择可见/隐藏", icon="INFO")
 
@@ -97,7 +93,7 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
         scene = context.scene
         obs = context.selected_objects
 
-        # 如果是在相机模式下勾选了球形相机，更新辅助线
+        # 相机球形模式
         if getattr(self, "_is_camera", False) and len(obs) == 1 and obs[0].type == "CAMERA":
             from .sphere_camera import _update_sphere_visualization
             _update_sphere_visualization(scene)
@@ -109,20 +105,19 @@ class ZLH_OT_SetObjectNames(bpy.types.Operator):
                 self.report({"INFO"}, f"{obs[0].name} 已取消球形随机相机")
             return {"FINISHED"}
 
-        # 普通改名逻辑
-        if not getattr(self, "_is_camera", False):
-            new = self.new_name.strip()
-            if not new:
-                self.report({"ERROR"}, "名称不能为空")
-                return {"CANCELLED"}
-            if len(obs) == 1:
-                obs[0].name = new
-                self.report({"INFO"}, f"已重命名为: {new}")
-            else:
-                for i, o in enumerate(obs):
-                    suffix = f"_{i}" if i > 0 else ""
-                    o.name = f"{new}{suffix}"
-                self.report({"INFO"}, f"已重命名 {len(obs)} 个物体为: {new}_*")
+        # 普通改名
+        new = self.new_name.strip()
+        if not new:
+            self.report({"ERROR"}, "名称不能为空")
+            return {"CANCELLED"}
+        if len(obs) == 1:
+            obs[0].name = new
+            self.report({"INFO"}, f"已重命名为: {new}")
+        else:
+            for i, o in enumerate(obs):
+                suffix = f"_{i}" if i > 0 else ""
+                o.name = f"{new}{suffix}"
+            self.report({"INFO"}, f"已重命名 {len(obs)} 个物体为: {new}_*")
         return {"FINISHED"}
 
 
@@ -464,32 +459,6 @@ class ZLH_OT_CheckUpdate(bpy.types.Operator):
 
         bpy.ops.preferences.addon_refresh()
         self.report({"INFO"}, f"已安装 {self.new_tag}，请前往 编辑→偏好设置→插件 搜索「zlh」并勾选启用")
-        return {"FINISHED"}
-
-
-class ZLH_OT_SphereCameraPreview(bpy.types.Operator):
-    """更新球形随机相机的辅助线预览"""
-    bl_idname = "zlh.sphere_camera_preview"
-    bl_label = "更新球形相机辅助线"
-    bl_options = {"REGISTER"}
-
-    @classmethod
-    def poll(cls, context):
-        return context.scene is not None
-
-    def execute(self, context):
-        from .sphere_camera import _update_sphere_visualization, _remove_sphere_visualization
-        scene = context.scene
-        cam = scene.camera
-        if cam is None:
-            self.report({"ERROR"}, "场景中没有激活相机")
-            return {"CANCELLED"}
-        if not getattr(cam, "zlh_sphere_camera", False):
-            _remove_sphere_visualization(scene)
-            self.report({"INFO"}, "当前相机不是球形随机相机，已清除辅助线")
-            return {"FINISHED"}
-        _update_sphere_visualization(scene)
-        self.report({"INFO"}, f"球心=({scene.zlh_sphere_center_x:.2f}, {scene.zlh_sphere_center_y:.2f}, {scene.zlh_sphere_center_z:.2f}) 半径={scene.zlh_sphere_radius:.2f}")
         return {"FINISHED"}
 
 
