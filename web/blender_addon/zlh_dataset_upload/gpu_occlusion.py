@@ -231,18 +231,19 @@ def _infer_combinations_from_depth(
         for name in vis:
             freq[name] += 1
 
+    # 收集全场景可见物体（所有 non-removable + 在任何组合中可见的 removable）
+    all_visible_set: Set[str] = set(base_visible_names)
+    for name in removable_names:
+        if name in depth_rm and depth_rm[name] is not None:
+            d = depth_rm[name]
+            if (d > 0).any():
+                all_visible_set.add(name)
+
     return {
         "all_objects": [o.name for o in all_meshes],
         "removable_names": removable_names,
         "non_removable_names": non_removable_names,
-        "all_visible": [
-            name for name in sorted(index_to_name.values())
-            if name in base_visible_names or any(
-                depth_rm.get(name) is not None
-                and (depth_rm[name] <= canvas).any()
-                and (depth_rm[name] > 0).any()
-            )
-        ],
+        "all_visible": sorted(all_visible_set),
         "effective_combinations": [
             {"mask": m, "visible": sorted(v)}
             for m, v in effective_list
