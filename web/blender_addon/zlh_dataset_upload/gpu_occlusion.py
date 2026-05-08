@@ -213,6 +213,8 @@ def _infer_combinations_from_depth(
 
         current_visible = base_visible_names.copy()
         for i in range(n_rem):
+            if not ((mask >> i) & 1):
+                continue  # 不在当前 mask 中 → 不可见
             d = depth_rm_list[i]
             if d is None:
                 continue
