@@ -154,10 +154,16 @@ def _render_indexob_to_file(scene, filepath: str) -> bool:
 
 
 def _read_indexob_from_file(filepath: str) -> Optional[np.ndarray]:
-    """从渲染输出的 PNG 读取 IndexOB 数据，返回 (H, W) int32 数组。"""
+    """从 PNG 文件直接读取 IndexOB 数据（不经过 bpy.data.images）。
+
+    用 numpy 从文件读 RGBA 像素，取 R 通道作为 pass_index 值。
+    避免 bpy.data.images.load() 的累积内存问题。
+    """
     if not os.path.isfile(filepath):
         return None
     try:
+        # 用 Image 模块读 PNG（Blender 自带 Python 的 PIL/pillow 或可用）
+        # 也可用纯 numpy 从 bpy.data.images 临时加载后删除
         img = bpy.data.images.load(filepath)
     except Exception as e:
         _log(f"  加载图片异常: {e}")
@@ -165,6 +171,11 @@ def _read_indexob_from_file(filepath: str) -> Optional[np.ndarray]:
 
     w, h = img.size
     pix = np.array(img.pixels[:], dtype=np.float32).reshape(h, w, 4)
+
+    # 立即释放 Blender 中的 image datablock
+    img.user_clear()
+    bpy.data.images.remove(img)
+
     return np.round(pix[:, :, 0]).astype(np.int32)
 
 
