@@ -499,10 +499,9 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
         elif self._phase == "render_rm":
             if self._render_idx >= len(self._removable_objs):
-                # 所有深度图渲染完毕，进入推断阶段
-                self._phase = "infer"
-                wm.progress_update(1 + len(self._removable_objs))
-                self.report({"INFO"}, "深度图渲染完成，开始推断有效组合…")
+                # 所有深度图渲染完毕，继续当前 timer 事件直接做推断
+                self._phase = "done_infer"
+                self._do_infer_and_finish(context)
                 return {"PASS_THROUGH"}
 
             rm_obj = self._removable_objs[self._render_idx]
@@ -529,34 +528,31 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
             self._render_idx += 1
             return {"PASS_THROUGH"}
 
-        elif self._phase == "infer":
-            # 关闭 timer
-            if self._timer:
-                wm.event_timer_remove(self._timer)
-                self._timer = None
-            wm.progress_end()
-
-            state = self._state
-            result = _infer_combinations_from_depth(
-                depth_nonrem=self._depth_nonrem,
-                depth_rm=self._depth_rm,
-                removable_names=state["removable_names"],
-                non_removable_names=state["non_removable_names"],
-                index_to_name=state["index_to_name"],
-                all_meshes=state["all_meshes"],
-            )
-            self._result = result
-
-            self._cleanup(context)
-
-            self._phase = "done"
-            _log(f"[gpu_occlusion] 分析完成: {len(result.get('effective_combinations', []))} 种有效组合")
-            return context.window_manager.invoke_props_dialog(self, width=700)
-
-        elif self._phase == "done":
-            return {"PASS_THROUGH"}
-
         return {"PASS_THROUGH"}
+
+    def _do_infer_and_finish(self, context):
+        """在 infer 阶段执行深度推断并弹出结果对话框。"""
+        wm = context.window_manager
+        if self._timer:
+            wm.event_timer_remove(self._timer)
+            self._timer = None
+        wm.progress_end()
+
+        state = self._state
+        result = _infer_combinations_from_depth(
+            depth_nonrem=self._depth_nonrem,
+            depth_rm=self._depth_rm,
+            removable_names=state["removable_names"],
+            non_removable_names=state["non_removable_names"],
+            index_to_name=state["index_to_name"],
+            all_meshes=state["all_meshes"],
+        )
+        self._result = result
+
+        self._cleanup(context)
+
+        _log(f"[gpu_occlusion] 分析完成: {len(result.get('effective_combinations', []))} 种有效组合")
+        context.window_manager.invoke_props_dialog(self, width=700)
 
     def draw(self, context):
         layout = self.layout
