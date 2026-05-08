@@ -1565,6 +1565,40 @@ function wireBatchRun() {
 
 // ==================== 启动 ====================
 
+// ==================== Blender 本地 Source 导入 ====================
+
+/**
+ * 从 blender_render 目录扫描最新的 sources，自动导入尚未导入的 source 为 album。
+ * 每次页面刷新 / 首次加载时调用。
+ * 导入成功后重新加载 state 并刷新 grid。
+ */
+async function importBlenderSources() {
+  try {
+    // 获取所有 blender sources
+    const data = await fetchJson(`${apiRoot()}/bridge/dataset/blender-sources`);
+    const sources = data.sources || [];
+    if (sources.length === 0) return;
+
+    // 导入所有未导入的 source
+    const importData = await fetchJson(`${apiRoot()}/bridge/dataset/blender-sources/import-all`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    if (importData.ok && importData.imported && importData.imported.length > 0) {
+      setToolbarStatus(`已导入 ${importData.imported.length} 个 Blender 渲染结果`);
+      // 重新加载 state 并刷新显示
+      await loadStateFromServer();
+      renderGrid();
+    }
+  } catch {
+    // 静默失败——可能后端不支持或目录不存在
+  }
+}
+
+// ==================== 启动 ====================
+
 document.addEventListener("DOMContentLoaded", () => {
   wireToolbar();
   wireImportButton();
@@ -1581,5 +1615,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     mountGrid();
     if (stateLoaded) startPolling();
+
+    // 首次加载时自动导入 Blender 本地 sources
+    await importBlenderSources();
   })();
 });

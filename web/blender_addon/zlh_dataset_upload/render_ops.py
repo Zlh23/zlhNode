@@ -5,7 +5,6 @@ import uuid
 
 import bpy
 
-from .http_util import _post_render_output
 from . import _log
 
 

@@ -386,28 +386,13 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
                     names_str = ",".join(sorted(actual_visible))
                     try:
                         from .http_util import _post_render_output
-                        data = _post_render_output(base, fname, names_str)
+                        data = _post_render_output(output_dir, fname, names_str)
                         if not data.get("ok"):
-                            raise RuntimeError(f"服务器返回错误: {data.get('error', 'unknown')}")
+                            raise RuntimeError(f"本地写入失败: {data.get('error', 'unknown')}")
                         uploaded += 1
-                        _log(f"[execute]  上传成功: outfit={names_str} file={fname}")
-                    except urllib.error.HTTPError as e:
-                        err_text = ""
-                        try:
-                            err_text = e.read().decode("utf-8", errors="replace")[:200]
-                        except Exception:
-                            pass
-                        msg = f"第 {idx + 1}/{total} 上传失败 HTTP {e.code} {err_text}"
-                        _log(f"[execute]  错误: {msg}")
-                        errors.append(msg)
-                        self.report({"WARNING"}, msg)
-                    except urllib.error.URLError as e:
-                        msg = f"第 {idx + 1}/{total} 网络错误: {e.reason}"
-                        _log(f"[execute]  错误: {msg}")
-                        errors.append(msg)
-                        self.report({"WARNING"}, msg)
+                        _log(f"[execute]  写入成功: outfit={names_str} file={fname}")
                     except Exception as e:
-                        msg = f"第 {idx + 1}/{total} 错误: {e}"
+                        msg = f"第 {idx + 1}/{total} 写入错误: {e}"
                         _log(f"[execute]  错误: {msg}")
                         import traceback
                         _log(traceback.format_exc())

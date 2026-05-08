@@ -20,7 +20,7 @@ def _log(msg: str):
 bl_info = {
     "name": "zlh 数据集渲染上传",
     "author": "zlhNode",
-    "version": (0, 0, 138),
+    "version": (0, 0, 139),
     "blender": (5, 1, 0),
     "location": "快捷键（默认 Ctrl+Shift+B / Ctrl+Shift+O / Ctrl+Shift+Q）",
     "description": "渲染上传、球形随机相机、物体重命名",

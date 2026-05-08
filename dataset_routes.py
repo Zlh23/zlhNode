@@ -293,20 +293,109 @@ def _cleanup_orphan_pool_files(st: dict[str, Any]) -> None:
 # ────────────────────────────────── Blender 渲染接口 ──────────────────────────────────
 
 
-def _save_blender_render_and_create_album(png: bytes, tags: str) -> tuple[str | None, list[dict[str, Any]]]:
-    """保存 Blender 渲染图到一个新 album，返回 (aid, albums)。"""
+# ─────── _load_blender_sources() -> list[dict[str, Any]]:
+    """从 blender_render 目录读取 sources.json，返回 source 列表。"""
+    src_dir = _blender_render_dir()
+    manifest_path = os.path.join(src_dir, "sources.json")
+    if not os.path.isfile(manifest_path):
+        return []
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            sources = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(sources, list):
+        return []
+    # 过滤：只保留图片仍在的 source
+    valid: list[dict[str, Any]] = []
+    for s in sources:
+        if not isinstance(s, dict):
+            continue
+        fname = s.get("filename", "")
+        if not fname:
+            continue
+        if os.path.isfile(os.path.join(src_dir, fname)):
+            valid.append(s)
+    return valid
+
+
+def _import_blender_source_to_album(source: dict[str, Any]) -> dict[str, Any] | None:
+    """将单个 blender source 导入为一个 album，返回 album dict 或 None。
+
+    导入成功后，从 sources.json 中移除该记录，并删除对应的图片文件（已复制到 pool）。
+    """
+    fname = source.get("filename", "")
+    source_id = source.get("id", "")
+    tags = source.get("object_names", "")
+    if not fname or not source_id:
+        return None
+    src_dir = _blender_render_dir()
+    img_path = os.path.join(src_dir, fname)
+    if not os.path.isfile(img_path):
+        return None
+    try:
+        with open(img_path, "rb") as f:
+            png = f.read()
+    except OSError:
+        return None
+    if not png:
+        return None
     fid = _save_image_file(png)
     if not fid:
-        return None, []
+        return None
     aid = uuid.uuid4().hex
+    album = {"aid": aid, "tags": tags, "images": [{"fid": fid}]}
+    # 加载状态并追加
     st = load_state()
     albums = st.setdefault("albums", [])
     if not isinstance(albums, list):
         albums = []
         st["albums"] = albums
-    albums.append({"aid": aid, "tags": tags, "images": [{"fid": fid}]})
+    albums.append(album)
     save_state(st)
-    return aid, st["albums"]
+
+    # 导入成功后：从 sources.json 移除已导入的记录，删除图片文件
+    _remove_blender_source(source_id, delete_file=True)
+    return album
+
+
+def _remove_blender_source(source_id: str, delete_file: bool = False) -> None:
+    """从 sources.json 中移除指定 id 的 source。"""
+    src_dir = _blender_render_dir()
+    manifest_path = os.path.join(src_dir, "sources.json")
+    if not os.path.isfile(manifest_path):
+        return
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            sources = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(sources, list):
+        return
+    new_sources: list[dict[str, Any]] = []
+    for s in sources:
+        if not isinstance(s, dict):
+            continue
+        if s.get("id") == source_id:
+            if delete_file:
+                fname = s.get("filename", "")
+                if fname:
+                    fpath = os.path.join(src_dir, fname)
+                    try:
+                        if os.path.isfile(fpath):
+                            os.remove(fpath)
+                    except OSError:
+                        pass
+            continue
+        new_sources.append(s)
+
+    try:
+        tmp = manifest_path + ".tmp." + uuid.uuid4().hex
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(new_sources, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, manifest_path)
+    except OSError:
+        pass
 
 
 # ────────────────────────────────── 注册路由 ──────────────────────────────────
@@ -521,60 +610,6 @@ def register() -> None:
 
     # ── Blender 渲染输出接口 ──
 
-    @server.routes.options("/bridge/render/output")
-    async def _opt_render_output(_request: web.Request) -> web.Response:
-        return _preflight()
-
-    @server.routes.post("/bridge/render/output")
-    async def bridge_render_output(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except json.JSONDecodeError:
-            return _json({"error": "invalid JSON"}, status=400)
-
-        filename = body.get("filename")
-        if not isinstance(filename, str) or not filename.strip():
-            return _json({"error": "filename required"}, status=400)
-        if not filename.endswith(".png") or "/" in filename or "\\" in filename:
-            return _json({"error": "invalid filename"}, status=400)
-        tags = body.get("object_names", "")
-        if not isinstance(tags, str):
-            tags = ""
-
-        src_path = os.path.join(_blender_render_dir(), filename)
-        if not os.path.isfile(src_path):
-            return _json({"error": f"file not found: {filename}"}, status=404)
-        try:
-            with open(src_path, "rb") as f:
-                png = f.read()
-        except OSError as e:
-            return _json({"error": f"read failed: {e}"}, status=500)
-
-        if not png:
-            return _json({"error": "empty file"}, status=400)
-
-        try:
-            aid, albums = _save_blender_render_and_create_album(png, tags)
-        except Exception as e:
-            return _json({"error": str(e)}, status=500)
-        finally:
-            try:
-                os.remove(src_path)
-            except OSError:
-                pass
-
-        if not aid:
-            return _json({"error": "write_failed"}, status=500)
-        # 需要找到第一个图片的 fid
-        first_fid = ""
-        for a in albums:
-            if a.get("aid") == aid:
-                imgs = a.get("images", [])
-                if imgs:
-                    first_fid = imgs[0].get("fid", "")
-                break
-        return _json({"ok": True, "id": first_fid, "album_id": aid, "albums": albums})
-
     # ── 清空 ──
 
     @server.routes.options("/bridge/dataset/clear-images")
@@ -763,6 +798,104 @@ def register() -> None:
         await _write_ndjson_line(resp, {"type": "done", "ok": True, "imported": imported})
         await resp.write_eof()
         return resp
+
+    # ── Blender 本地 Sources ──
+
+    @server.routes.options("/bridge/dataset/blender-sources")
+    async def _opt_blender_sources(_request: web.Request) -> web.Response:
+        return _preflight()
+
+    @server.routes.get("/bridge/dataset/blender-sources")
+    async def dataset_blender_sources(_request: web.Request) -> web.Response:
+        """返回 blender_render 目录中最新的 source 列表（含来源类型，不含图片数据）。"""
+        sources = _load_blender_sources()
+        # 为每个 source 添加图片 URL 路径信息
+        result: list[dict[str, Any]] = []
+        for s in sources:
+            fname = s.get("filename", "")
+            result.append({
+                "id": s.get("id", ""),
+                "filename": fname,
+                "object_names": s.get("object_names", ""),
+                "source_type": s.get("source_type", "blender_render"),
+                # 客户端可通过此 URL 获取图片
+                "image_url": f"/bridge/dataset/blender-source-image/{fname}",
+            })
+        return _json({"sources": result})
+
+    @server.routes.options("/bridge/dataset/blender-source-image/{filename}")
+    async def _opt_blender_source_image(_request: web.Request) -> web.Response:
+        return _preflight()
+
+    @server.routes.get("/bridge/dataset/blender-source-image/{filename}")
+    async def dataset_blender_source_image(request: web.Request) -> web.Response:
+        """返回 blender source 的 PNG 图片。"""
+        fname = request.match_info.get("filename", "")
+        if not fname or "/" in fname or "\\" in fname or not fname.endswith(".png"):
+            return _json({"error": "invalid filename"}, status=400)
+        path = os.path.join(_blender_render_dir(), fname)
+        if not os.path.isfile(path):
+            return web.Response(status=404)
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            return _json({"error": str(e)}, status=500)
+        r = web.Response(body=data, content_type="image/png")
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Cache-Control"] = "no-store"
+        return r
+
+    @server.routes.options("/bridge/dataset/blender-sources/import")
+    async def _opt_blender_sources_import(_request: web.Request) -> web.Response:
+        return _preflight()
+
+    @server.routes.post("/bridge/dataset/blender-sources/import")
+    async def dataset_blender_sources_import(request: web.Request) -> web.Response:
+        """导入指定的 blender source 为 album。"""
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return _json({"error": "invalid JSON"}, status=400)
+
+        source_id = body.get("source_id")
+        if not isinstance(source_id, str) or not source_id.strip():
+            return _json({"error": "source_id required"}, status=400)
+
+        sources = _load_blender_sources()
+        target = None
+        for s in sources:
+            if s.get("id") == source_id:
+                target = s
+                break
+        if target is None:
+            return _json({"error": "source not found"}, status=404)
+
+        album = _import_blender_source_to_album(target)
+        if album is None:
+            return _json({"error": "import failed"}, status=500)
+
+        st = load_state()
+        return _json({"ok": True, "album": album, "albums": st.get("albums", [])})
+
+    @server.routes.options("/bridge/dataset/blender-sources/import-all")
+    async def _opt_blender_sources_import_all(_request: web.Request) -> web.Response:
+        return _preflight()
+
+    @server.routes.post("/bridge/dataset/blender-sources/import-all")
+    async def dataset_blender_sources_import_all(_request: web.Request) -> web.Response:
+        """导入所有尚未导入的 blender source 为 album。"""
+        sources = _load_blender_sources()
+        imported: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for s in sources:
+            album = _import_blender_source_to_album(s)
+            if album:
+                imported.append({"source_id": s.get("id", ""), "album_id": album["aid"]})
+            else:
+                errors.append(f"导入失败: {s.get('filename', '?')}")
+        st = load_state()
+        return _json({"ok": True, "imported": imported, "errors": errors, "albums": st.get("albums", [])})
 
     # 保留旧接口（GET pool image）用于兼容旧引用，返回 404
     @server.routes.get("/bridge/dataset/pool/gallery/{file_id}/image")
