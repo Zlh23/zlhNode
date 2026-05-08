@@ -255,7 +255,7 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
 
         # tag 随机
         box_tag = layout.box()
-        box_tag.label(text="第二层：tag 随机", icon="SHUFFLE")
+        box_tag.label(text="第二层：tag 随机", icon="BLANK1")
         box_tag.prop(self, "tag_random_count")
 
         # 统计
@@ -263,7 +263,7 @@ class ZLH_OT_RenderUpload(bpy.types.Operator):
         tag_n = self.tag_random_count
         total = view_n * tag_n
         box_total = layout.box()
-        box_total.label(text=f"共计渲染: {view_n} 视角 × {tag_n} tag = {total} 张", icon="RENDER_STILL")
+        box_total.label(text=f"共计渲染: {view_n} 视角 × {tag_n} tag = {total} 张", icon="INFO")
         box_total.label(text="确认后将开始渲染，是否继续？", icon="QUESTION")
 
     def execute(self, context):

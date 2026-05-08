@@ -34,7 +34,7 @@ class ZLH_AddonPreferences(AddonPreferences):
         layout.prop(self, "output_dir")
         box = layout.box()
         box.label(text="快捷键：编辑 → 偏好设置 → 键位映射 → 搜索「zlh」", icon="INFO")
-        box.label(text="Ctrl+Shift+B：随机选择 removable 组合 → 渲染 → IndexOB 检测 → 上传", icon="RENDER_STILL")
+        box.label(text="Ctrl+Shift+B：随机选择 removable 组合 → 渲染 → IndexOB 检测 → 上传", icon="RENDERLAYERS")
         box.label(text="  - 弹窗选择随机张数，每张随机决定 removable 可见性")
         box.label(text="Ctrl+Shift+O：选中相机时设为球形随机相机；选中物体时修改名称/removable", icon="OBJECT_DATA")
         box.label(text="  - 球形相机：在球面上随机移动，始终对准球心", icon="SPHERE")
