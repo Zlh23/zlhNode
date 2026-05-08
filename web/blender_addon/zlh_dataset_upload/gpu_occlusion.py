@@ -71,35 +71,39 @@ def _restore_render_state(scene, state: dict):
 
 def _create_compositor_node_tree(scene) -> bpy.types.NodeTree:
     """为场景创建并分配一个 Compositor 节点树。"""
+    _log(f"[gpu_occlusion] 创建 Compositor 节点树 (scene={scene.name})")
     tree = bpy.data.node_groups.new(
         name=f"CompositorNodeTree_{scene.name}",
         type="CompositorNodeTree",
     )
+    _log(f"[gpu_occlusion] 创建成功: {tree}")
     scene.compositing_node_group = tree
-    # 确保输出 socket 存在
+    _log(f"[gpu_occlusion] 已赋值到 scene.compositing_node_group")
     if "Image" not in tree.interface:
         tree.interface.new_socket(
             name="Image", in_out="OUTPUT", socket_type="NodeSocketColor",
         )
+        _log(f"[gpu_occlusion] 已创建 Image output socket")
     scene.render.use_compositing = True
+    _log(f"[gpu_occlusion] render.use_compositing = True")
     return tree
 
 
 def _reset_compositor_for_indexob(scene):
-    """设置 Compositor 为 IndexOB → Viewer Node。
-
-    Blender 5.x 中需要：
-      - GroupOutput 节点作为树输出
-      - interface.output socket 注册输出插槽
-      - 连接 RLayers.IndexOB → Viewer.input
-    """
+    """设置 Compositor 为 IndexOB → Viewer Node。"""
     tree = scene.compositing_node_group
     if tree is None:
         tree = _create_compositor_node_tree(scene)
     else:
         scene.render.use_compositing = True
 
-    # 清除已有节点
+    # 确保 interface 上有 Image output socket
+    if "Image" not in tree.interface:
+        tree.interface.new_socket(
+            name="Image", in_out="OUTPUT", socket_type="NodeSocketColor",
+        )
+
+    # 清除已有节点（保留 interface）
     for n in list(tree.nodes):
         tree.nodes.remove(n)
 
