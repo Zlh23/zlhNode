@@ -1,20 +1,12 @@
-"""GPU 加速遮挡检测：枚举 removable 所有子集，渲染并记录实际可见物体。
-
-核心问题：
-  给定一组标了 removable 的物体，它们可以通过隐藏/显示产生 2^n 种组合。
-  但实际上，由于物体之间的相互遮挡，很多组合会产生相同的「可见物体集合」。
-  例如：物体 A 完全在物体 B 后面，无论 A 是否隐藏，可见物体集合都一样。
-  这个工具就是枚举所有组合，记录每种组合下实际可见了哪些物体。
+"""GPU 加速遮挡检测：基于深度图的组合推断。
 
 核心思路：
-  1. 给所有可见 MESH 物体分配唯一的 pass_index
-  2. 枚举 removable 物体的所有子集组合（2^n 种）
-  3. 对每种组合：
-     a. 设置该组合中隐藏的物体不可渲染（hide_render=True）
-     b. 用 Eevee 快速渲染一张 IndexOB 图（写到临时文件，避免弹出渲染窗口）
-     c. 从文件读取渲染结果，记录该组合下实际可见了哪些物体（pass_index → 有像素）
-     d. 恢复所有物体的 hide_render
-  4. 对所有组合的结果去重，得到「实际有效」的组合种类
+  渲染 n+1 张深度图代替 2^n 次 IndexOB 渲染：
+  - 1 张仅 non-removable 的基准深度图
+  - n 张各 removable 单独深度图（仅该物体可见）
+  然后通过 numpy 比较深度值推断各组合的实际可见物体：
+  - 从基准深度开始，逐个叠加 removable
+  - 如果该物体的深度图在某像素上比当前画布浅，则它可见
 
 用法：Blender 中按 Ctrl+Shift+Q 触发
 """
@@ -30,7 +22,6 @@ from . import _log
 
 # ── 渲染参数 ──────────────────────────────────────────────
 RENDER_RESOLUTION_PERCENT = 100
-MAX_PASS_INDEX = 32767
 
 
 # ════════════════════════════════════════════════════════════
@@ -43,7 +34,7 @@ def _save_render_state(scene) -> dict:
     return {
         "engine": render.engine,
         "resolution_percentage": render.resolution_percentage,
-        "use_pass_object_index": vl.use_pass_object_index,
+        "use_pass_z": vl.use_pass_z,
         "use_compositing": render.use_compositing,
     }
 
@@ -53,21 +44,13 @@ def _restore_render_state(scene, state: dict):
     vl = scene.view_layers[0]
     render.engine = state["engine"]
     render.resolution_percentage = state["resolution_percentage"]
-    vl.use_pass_object_index = state["use_pass_object_index"]
+    vl.use_pass_z = state["use_pass_z"]
     render.use_compositing = state["use_compositing"]
 
 
 # ════════════════════════════════════════════════════════════
 # Blender 5.x Compositor 节点树管理
 # ════════════════════════════════════════════════════════════
-#
-# Blender 5.x API 变更：
-#   - Scene.node_tree → Scene.compositing_node_group
-#   - Scene.use_nodes → Scene.render.use_compositing（已废弃）
-#   - 节点树需要手动创建并通过 bpy.data.node_groups.new() 创建
-#
-# 当场景从未进入过 Compositor 时，compositing_node_group 为 None，
-# 需要用 bpy.data.node_groups.new(type='CompositorNodeTree') 创建。
 
 def _create_compositor_node_tree(scene) -> bpy.types.NodeTree:
     """为场景创建并分配一个 Compositor 节点树。"""
@@ -76,56 +59,48 @@ def _create_compositor_node_tree(scene) -> bpy.types.NodeTree:
         name=f"CompositorNodeTree_{scene.name}",
         type="CompositorNodeTree",
     )
-    _log(f"[gpu_occlusion] 创建成功: {tree}")
     scene.compositing_node_group = tree
-    _log(f"[gpu_occlusion] 已赋值到 scene.compositing_node_group")
     tree.interface.new_socket(
         name="Image", in_out="OUTPUT", socket_type="NodeSocketColor",
     )
-    _log(f"[gpu_occlusion] 已创建 Image output socket")
     scene.render.use_compositing = True
-    _log(f"[gpu_occlusion] render.use_compositing = True")
+    _log(f"[gpu_occlusion] Compositor 节点树创建完成")
     return tree
 
 
-def _reset_compositor_for_indexob(scene):
-    """设置 Compositor 为 IndexOB → Viewer Node。"""
+def _reset_compositor_for_depth(scene):
+    """设置 Compositor：RLayers.Z → Viewer（用于读取深度图）。"""
     tree = scene.compositing_node_group
     if tree is None:
         tree = _create_compositor_node_tree(scene)
     else:
         scene.render.use_compositing = True
 
-    # 清除已有节点（保留 interface）
     for n in list(tree.nodes):
         tree.nodes.remove(n)
 
-    # Render Layers 节点
     rl = tree.nodes.new(type="CompositorNodeRLayers")
     rl.location = (0, 0)
 
-    # Viewer 节点（用于读取渲染结果）
     viewer = tree.nodes.new(type="CompositorNodeViewer")
     viewer.location = (300, 0)
     viewer.name = "zlh_viewer"
 
-    # GroupOutput 节点（Blender 5.x 必须）
     output = tree.nodes.new(type="NodeGroupOutput")
     output.location = (600, 0)
 
-    # 连接 Image（保证 Compositor 正常输出）
+    # 连 Image 到 GroupOutput（Compositor 必须有输出）
     try:
-        tree.links.new(rl.outputs["Image"], viewer.inputs[0])
         tree.links.new(rl.outputs["Image"], output.inputs["Image"])
     except Exception:
         pass
 
-    # 再把 IndexOB 连到 Viewer（覆盖 Image，使 Viewer 显示 Index 数据）
+    # 连 Z 到 Viewer（深度图数据通过 Viewer Node 读取）
     try:
-        tree.links.new(rl.outputs["IndexOB"], viewer.inputs[0])
+        tree.links.new(rl.outputs["Z"], viewer.inputs[0])
     except KeyError:
         for out in rl.outputs:
-            if "Index" in out.name or "index" in out.name:
+            if out.name == "Depth" or "depth" in out.name.lower():
                 tree.links.new(out, viewer.inputs[0])
                 break
 
@@ -133,11 +108,11 @@ def _reset_compositor_for_indexob(scene):
 
 
 # ════════════════════════════════════════════════════════════
-# 渲染并读取 IndexOB（写文件方式，避免弹出渲染窗口）
+# 渲染并读取深度图
 # ════════════════════════════════════════════════════════════
 
-def _render_indexob_to_file(scene, filepath: str) -> bool:
-    """渲染 IndexOB 到临时 PNG 文件，避免弹出渲染窗口阻塞 UI。"""
+def _render_depth_to_file(scene, filepath: str) -> bool:
+    """渲染深度图到文件。"""
     fp_orig = scene.render.filepath
     fmt_orig = scene.render.image_settings.file_format
     scene.render.image_settings.file_format = "PNG"
@@ -146,123 +121,159 @@ def _render_indexob_to_file(scene, filepath: str) -> bool:
         bpy.ops.render.render(write_still=True)
         return os.path.isfile(filepath)
     except Exception as e:
-        _log(f"  渲染异常: {e}")
+        _log(f"  渲染深度图异常: {e}")
         return False
     finally:
         scene.render.filepath = fp_orig
         scene.render.image_settings.file_format = fmt_orig
 
 
-def _read_indexob_from_file(filepath: str) -> Optional[np.ndarray]:
-    """从 PNG 文件直接读取 IndexOB 数据（不经过 bpy.data.images）。
+def _read_depth_from_file(filepath: str) -> Optional[np.ndarray]:
+    """从 PNG 文件读取 Z 通道数据，返回 (H, W) float32 数组。
 
-    用 numpy 从文件读 RGBA 像素，取 R 通道作为 pass_index 值。
-    避免 bpy.data.images.load() 的累积内存问题。
+    Eevee 渲染深度图时 Viewer Node 将 Z 值映射到 [0,1] 范围，
+    读取后需要还原为实际深度（近裁面=0, 远裁面=1 mapped）。
     """
     if not os.path.isfile(filepath):
         return None
     try:
-        # 用 Image 模块读 PNG（Blender 自带 Python 的 PIL/pillow 或可用）
-        # 也可用纯 numpy 从 bpy.data.images 临时加载后删除
         img = bpy.data.images.load(filepath)
     except Exception as e:
-        _log(f"  加载图片异常: {e}")
+        _log(f"  加载深度图异常: {e}")
         return None
 
     w, h = img.size
     pix = np.array(img.pixels[:], dtype=np.float32).reshape(h, w, 4)
 
-    # 立即释放 Blender 中的 image datablock
+    # 释放 Blender image datablock
     img.user_clear()
     bpy.data.images.remove(img)
 
-    return np.round(pix[:, :, 0]).astype(np.int32)
+    # Eevee 深度图在 Viewer Node 的 R 通道
+    return pix[:, :, 0]
 
 
 # ════════════════════════════════════════════════════════════
-# 核心枚举逻辑
+# 深度图推断有效组合
 # ════════════════════════════════════════════════════════════
 
-def _prepare_enumeration(context) -> Optional[dict]:
-    """枚举前的准备工作：收集物体、分配 pass_index、设置场景。"""
-    scene = context.scene
-    cam = scene.camera
-    if cam is None:
-        return {"error": "场景中没有激活相机"}
+def _infer_combinations_from_depth(
+    depth_nonrem: np.ndarray,
+    depth_rm: Dict[str, np.ndarray],
+    removable_names: List[str],
+    non_removable_names: List[str],
+    index_to_name: Dict[int, str],
+    all_meshes: List[bpy.types.Object],
+) -> dict:
+    """从深度图推断有效组合。
 
-    _log("[gpu_occlusion] ===== 开始枚举各组合的实际可见物体 =====")
+    从基准深度开始，逐个叠加 removable 物体的深度图。
+    如果某物体在某像素上比当前画布浅，则它在当前画布上是可见的。
 
-    # 1. 收集所有可见 MESH
-    all_meshes: List[bpy.types.Object] = []
-    for obj in scene.objects:
-        if obj.type != "MESH":
+    返回与之前相同格式的 result dict。
+    """
+    _log("[gpu_occlusion] ===== 开始 CPU 深度推断有效组合 =====")
+
+    current_depth = depth_nonrem.copy()
+    base_visible_names = set(non_removable_names)
+
+    # 对 removable 按平均深度排序（近到远）
+    rm_mean_depths: List[Tuple[str, float]] = []
+    for name in removable_names:
+        d = depth_rm.get(name)
+        if d is None:
             continue
-        if obj.hide_get() or not obj.visible_get():
-            continue
-        all_meshes.append(obj)
-
-    if not all_meshes:
-        return {"error": "场景中无可见 MESH 物体"}
-
-    # 2. 分配 pass_index
-    index_to_name: Dict[int, str] = {}
-    for idx, obj in enumerate(all_meshes):
-        pid = idx + 1
-        obj.pass_index = pid
-        index_to_name[pid] = obj.name
-
-    # 3. 筛选 removable
-    removable: List[bpy.types.Object] = []
-    non_removable: List[bpy.types.Object] = []
-    for obj in all_meshes:
-        if getattr(obj, "zlh_removable", False):
-            removable.append(obj)
+        mask = d > 0
+        if mask.any():
+            rm_mean_depths.append((name, float(d[mask].mean())))
         else:
-            non_removable.append(obj)
+            rm_mean_depths.append((name, float("inf")))
+    rm_mean_depths.sort(key=lambda x: x[1])
 
-    n_rem = len(removable)
-    total_combo = 1 << n_rem
-    _log(f"[gpu_occlusion] 总 MESH = {len(all_meshes)}, "
-         f"removable = {n_rem}, 理论组合 = {total_combo}")
+    # 收集全场景可见物体
+    depth_full = depth_nonrem.copy()
+    for name, d in depth_rm.items():
+        if d is None:
+            continue
+        depth_full = np.minimum(depth_full, d)
+    all_visible_names: Set[str] = set()
+    for pid, name in index_to_name.items():
+        if name in non_removable_names:
+            all_visible_names.add(name)
+        elif name in removable_names:
+            dd = np.minimum(depth_nonrem, depth_rm.get(name, depth_nonrem))
+            if (dd < current_depth).any() or (depth_rm.get(name, np.zeros_like(current_depth)) > 0).any():
+                all_visible_names.add(name)
 
-    # 4. 保存原始状态
-    orig_render = _save_render_state(scene)
-    orig_hide: Dict[str, bool] = {}
-    for obj in all_meshes:
-        orig_hide[obj.name] = obj.hide_render
-    orig_pass: Dict[str, int] = {}
-    for obj in scene.objects:
-        orig_pass[obj.name] = obj.pass_index
-    orig_workspace = context.window.workspace.name if context.window else None
+    # 逐层叠加
+    seen_signatures: Set[Tuple[str, ...]] = set()
+    effective_list: List[Tuple[int, Set[str]]] = []
 
-    # 5. 设置 Eevee + Compositor
-    scene.render.engine = (
-        "BLENDER_EEVEE_NEXT"
-        if hasattr(bpy.types, "BLENDER_EEVEE_NEXT")
-        else "BLENDER_EEVEE"
-    )
-    scene.render.resolution_percentage = RENDER_RESOLUTION_PERCENT
-    scene.view_layers[0].use_pass_object_index = True
+    # 初始：仅 non-removable
+    sig0 = tuple(sorted(base_visible_names))
+    seen_signatures.add(sig0)
+    effective_list.append((0, base_visible_names.copy()))
+    _log(f"[gpu_occlusion] 基准组合: visible={sorted(base_visible_names)}")
 
-    if context.window:
-        for ws in bpy.data.workspaces:
-            if ws.name == "Compositing":
-                context.window.workspace = ws
-                break
+    # 对每个 priority mask（1 << i），对应 removable_names[i] 是否可见
+    n_rem = len(removable_names)
+    # 建立 name -> index 映射
+    name_to_idx = {name: i for i, name in enumerate(removable_names)}
 
-    _reset_compositor_for_indexob(scene)
+    # 逐个叠加 removable
+    for name, _mean_d in rm_mean_depths:
+        d_rm = depth_rm.get(name)
+        if d_rm is None:
+            continue
+
+        # 检查：该物体是否有像素比当前画布浅
+        deeper_mask = d_rm < current_depth
+        if deeper_mask.any():
+            # 这个物体可见，更新画布
+            current_depth = np.minimum(current_depth, d_rm)
+            # 构建当前可见集：base + 所有比当前画布浅的 removable
+            current_visible = base_visible_names.copy()
+            for other_name, other_d in depth_rm.items():
+                if other_d is None:
+                    continue
+                if (other_d < current_depth).any():
+                    current_visible.add(other_name)
+                else:
+                    # 检查该物体自身是否有任何非零深度像素（即它本体出现了）
+                    if (other_d > 0).any():
+                        current_visible.add(other_name)
+            sig = tuple(sorted(current_visible))
+            if sig not in seen_signatures:
+                seen_signatures.add(sig)
+                # mask：每个 removable 的位置
+                mask = 0
+                for i, rm_name in enumerate(removable_names):
+                    if rm_name in current_visible:
+                        mask |= (1 << i)
+                effective_list.append((mask, current_visible))
+                _log(f"[gpu_occlusion] 组合 mask={mask}: 新增有效组合 → {sorted(current_visible)}")
+
+    _log(f"[gpu_occlusion] 深度推断完成: {len(effective_list)} 种有效组合")
+
+    # 统计频次
+    from collections import Counter
+    freq: Counter[str] = Counter()
+    for _mask, vis in effective_list:
+        for name in vis:
+            freq[name] += 1
 
     return {
-        "all_meshes": all_meshes,
-        "removable": removable,
-        "non_removable": non_removable,
-        "index_to_name": index_to_name,
-        "n_rem": n_rem,
-        "total_combo": total_combo,
-        "orig_render": orig_render,
-        "orig_hide": orig_hide,
-        "orig_pass": orig_pass,
-        "orig_workspace": orig_workspace,
+        "all_objects": [o.name for o in all_meshes],
+        "removable_names": removable_names,
+        "non_removable_names": non_removable_names,
+        "all_visible": sorted(all_visible_names),
+        "effective_combinations": [
+            {"mask": m, "visible": sorted(v)}
+            for m, v in effective_list
+        ],
+        "count": len(effective_list),
+        "total_theoretical": 1 << n_rem,
+        "frequency": dict(freq.most_common()),
     }
 
 
@@ -271,7 +282,7 @@ def _prepare_enumeration(context) -> Optional[dict]:
 # ════════════════════════════════════════════════════════════
 
 class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
-    """GPU 加速遮挡分析：枚举 removable 各子集，记录实际可见物体"""
+    """GPU 加速遮挡分析：基于深度图的组合推断"""
     bl_idname = "zlh.gpu_occlusion_analysis"
     bl_label = "zlh: GPU 遮挡分析"
     bl_options = {"REGISTER", "BLOCKING"}
@@ -280,18 +291,18 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
     _state: dict = {}
     _timer = None
     _temp_dir: str = ""
-    _mask: int = 0
-    _n_rem: int = 0
-    _removable: list = []
-    _all_visible_set: set = set()
-    _seen_signatures: set = set()
-    _effective_list: list = []
+    _phase: str = ""            # "render_base", "render_rm", "infer", "done"
+    _render_idx: int = 0
+    _removable_objs: list = []
+    _non_removable_objs: list = []
+    _all_meshes: list = []
+    _depth_nonrem: Optional[np.ndarray] = None
+    _depth_rm: Dict[str, Optional[np.ndarray]] = {}
 
     # ── 分析结果 ──
     _result: dict = {}
 
     def _cleanup(self, context):
-        """清理临时文件和场景状态。"""
         if self._temp_dir and os.path.isdir(self._temp_dir):
             import shutil
             try:
@@ -306,15 +317,12 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
 
         scene = context.scene
         orig_hide = state.get("orig_hide", {})
-        orig_pass = state.get("orig_pass", {})
         orig_render = state.get("orig_render")
         orig_workspace = state.get("orig_workspace")
 
         for obj in scene.objects:
             if obj.name in orig_hide:
                 obj.hide_render = orig_hide[obj.name]
-            if obj.name in orig_pass:
-                obj.pass_index = orig_pass[obj.name]
 
         if orig_render:
             _restore_render_state(scene, orig_render)
@@ -328,47 +336,6 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         context.view_layer.update()
         _log("[gpu_occlusion] 场景状态已恢复")
 
-    def _render_one_combo(self, context) -> Optional[str]:
-        """渲染当前组合的一张 IndexOB，返回文件名，失败返回 None。"""
-        scene = context.scene
-        fname = f"zlh_idx_{self._mask:04d}.png"
-        filepath = os.path.join(self._temp_dir, fname)
-        ok = _render_indexob_to_file(scene, filepath)
-        if not ok:
-            return None
-        return fname
-
-    def _analyze_frame(self, context) -> bool:
-        """解析当前帧的渲染结果，更新有效组合列表。返回 True 表示成功。"""
-        fname = self._render_one_combo(context)
-        if fname is None:
-            _log(f"  组合 mask={self._mask}: 渲染失败，跳过")
-            self._mask += 1
-            return True
-
-        filepath = os.path.join(self._temp_dir, fname)
-        idx_map = _read_indexob_from_file(filepath)
-        if idx_map is None:
-            _log(f"  组合 mask={self._mask}: 读取渲染结果失败，跳过")
-            self._mask += 1
-            return True
-
-        index_to_name = self._state["index_to_name"]
-
-        actually_visible: Set[str] = set()
-        for pid, name in index_to_name.items():
-            if np.any(idx_map == pid):
-                actually_visible.add(name)
-
-        sig = tuple(sorted(actually_visible))
-        if sig not in self._seen_signatures:
-            self._seen_signatures.add(sig)
-            self._effective_list.append((self._mask, actually_visible))
-            _log(f"  组合 mask={self._mask}: 新增有效组合 → {sorted(actually_visible)}")
-
-        self._mask += 1
-        return True
-
     @classmethod
     def poll(cls, context):
         return context.scene is not None and context.scene.camera is not None
@@ -378,130 +345,216 @@ class ZLH_OT_GPUOcclusionAnalysis(bpy.types.Operator):
         self._result = {}
         self._temp_dir = ""
         self._timer = None
-        self._mask = 0
-        self._seen_signatures = set()
-        self._effective_list = []
+        self._phase = ""
+        self._render_idx = 0
+        self._removable_objs = []
+        self._non_removable_objs = []
+        self._all_meshes = []
+        self._depth_nonrem = None
+        self._depth_rm = {}
 
-        state = _prepare_enumeration(context)
-        if state is None or "error" in (state or {}):
-            err = (state or {}).get("error", "未知错误")
-            self.report({"ERROR"}, err)
-            _log(f"[operator] 准备失败: {err}")
+        scene = context.scene
+        cam = scene.camera
+        if cam is None:
+            self.report({"ERROR"}, "场景中没有激活相机")
             return {"CANCELLED"}
 
-        self._state = state
-        self._removable = state["removable"]
-        self._n_rem = state["n_rem"]
+        _log("[gpu_occlusion] ===== 开始基于深度图的遮挡分析 =====")
 
-        total_combo = state["total_combo"]
-        _log(f"[operator] 开始模态 GPU 遮挡分析，共 {total_combo} 种组合")
+        # ── 1. 收集所有可见 MESH 物体并分配 pass_index（用于识别） ──
+        all_meshes: List[bpy.types.Object] = []
+        for obj in scene.objects:
+            if obj.type != "MESH":
+                continue
+            if obj.hide_get() or not obj.visible_get():
+                continue
+            all_meshes.append(obj)
 
-        # 先渲染全场景（全部可见），确定「所有可能出现的物体」
-        scene = context.scene
-        all_meshes = state["all_meshes"]
-        index_to_name = state["index_to_name"]
+        if not all_meshes:
+            self.report({"ERROR"}, "场景中无可见 MESH 物体")
+            return {"CANCELLED"}
 
+        # 分配 pass_index
+        index_to_name: Dict[int, str] = {}
+        for idx, obj in enumerate(all_meshes):
+            pid = idx + 1
+            obj.pass_index = pid
+            index_to_name[pid] = obj.name
+
+        # 筛选 removable / non-removable
+        removable_objs: List[bpy.types.Object] = []
+        non_removable_objs: List[bpy.types.Object] = []
         for obj in all_meshes:
-            obj.hide_render = False
-        context.view_layer.update()
+            if getattr(obj, "zlh_removable", False):
+                removable_objs.append(obj)
+            else:
+                non_removable_objs.append(obj)
 
-        # 创建临时目录
+        if not removable_objs:
+            self.report({"ERROR"}, "没有标记为 removable 的物体，无需分析")
+            return {"CANCELLED"}
+
+        removable_names = [o.name for o in removable_objs]
+        non_removable_names = [o.name for o in non_removable_objs]
+        n_rem = len(removable_objs)
+        _log(f"[gpu_occlusion] 总 MESH = {len(all_meshes)}, "
+             f"removable = {n_rem}, non-removable = {len(non_removable_objs)}")
+
+        # ── 2. 保存原始状态 ──
+        orig_render = _save_render_state(scene)
+        orig_hide: Dict[str, bool] = {}
+        for obj in all_meshes:
+            orig_hide[obj.name] = obj.hide_render
+        orig_pass: Dict[str, int] = {}
+        for obj in scene.objects:
+            orig_pass[obj.name] = obj.pass_index
+        orig_workspace = context.window.workspace.name if context.window else None
+
+        # ── 3. 设置 Eevee + Compositor ──
+        scene.render.engine = (
+            "BLENDER_EEVEE_NEXT"
+            if hasattr(bpy.types, "BLENDER_EEVEE_NEXT")
+            else "BLENDER_EEVEE"
+        )
+        scene.render.resolution_percentage = RENDER_RESOLUTION_PERCENT
+
+        # 启用 Z pass
+        scene.view_layers[0].use_pass_z = True
+
+        # 切换到 Compositing workspace
+        if context.window:
+            for ws in bpy.data.workspaces:
+                if ws.name == "Compositing":
+                    context.window.workspace = ws
+                    break
+
+        _reset_compositor_for_depth(scene)
+
+        self._state = {
+            "all_meshes": all_meshes,
+            "removable_objs": removable_objs,
+            "non_removable_objs": non_removable_objs,
+            "removable_names": removable_names,
+            "non_removable_names": non_removable_names,
+            "index_to_name": index_to_name,
+            "n_rem": n_rem,
+            "orig_render": orig_render,
+            "orig_hide": orig_hide,
+            "orig_pass": orig_pass,
+            "orig_workspace": orig_workspace,
+        }
+        self._removable_objs = removable_objs
+        self._non_removable_objs = non_removable_objs
+        self._all_meshes = all_meshes
+
+        # ── 4. 创建临时目录, 启动渲染流程 ──
         self._temp_dir = tempfile.mkdtemp(prefix="zlh_gpu_occlusion_")
 
-        # 渲染全场景
-        full_path = os.path.join(self._temp_dir, "zlh_idx_full.png")
-        ok = _render_indexob_to_file(scene, full_path)
-        if not ok:
-            self._cleanup(context)
-            self.report({"ERROR"}, "全场景渲染失败")
-            return {"CANCELLED"}
-
-        full_index = _read_indexob_from_file(full_path)
-        if full_index is None:
-            self._cleanup(context)
-            self.report({"ERROR"}, "全场景渲染结果读取失败")
-            return {"CANCELLED"}
-
-        all_visible_set: Set[str] = set()
-        for pid, name in index_to_name.items():
-            if np.any(full_index == pid):
-                all_visible_set.add(name)
-
-        _log(f"[gpu_occlusion] 全场景可见物体 = {len(all_visible_set)} 个")
-        self._all_visible_set = all_visible_set
-
-        # 启动模态 timer
+        total_renders = 1 + n_rem  # base + 每个 removable
         wm = context.window_manager
-        wm.progress_begin(0, total_combo)
+        wm.progress_begin(0, total_renders)
+
+        # 先渲染基准深度（仅 non-removable）
+        self._phase = "render_base"
+        self._render_idx = 0  # 渲染步骤索引：0 = base, 1..n = rm_i
         self._timer = wm.event_timer_add(0.01, window=context.window)
         wm.modal_handler_add(self)
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event):
-        if event.type == "TIMER":
-            wm = context.window_manager
-            state = self._state
-            scene = context.scene
-            total_combo = state["total_combo"]
-            all_meshes = state["all_meshes"]
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
 
-            if self._mask >= total_combo:
-                wm.progress_end()
-                if self._timer:
-                    wm.event_timer_remove(self._timer)
-                    self._timer = None
+        wm = context.window_manager
+        scene = context.scene
 
-                _log(f"[gpu_occlusion] 枚举完成: {len(self._effective_list)} / {total_combo} 种有效组合")
-
-                from collections import Counter
-                removable = self._removable
-                non_removable = state["non_removable"]
-                freq: Counter[str] = Counter()
-                for _mask, vis in self._effective_list:
-                    for name in vis:
-                        freq[name] += 1
-
-                self._result = {
-                    "all_objects": [o.name for o in all_meshes],
-                    "removable_names": [o.name for o in removable],
-                    "non_removable_names": [o.name for o in non_removable],
-                    "all_visible": sorted(self._all_visible_set),
-                    "effective_combinations": [
-                        {"mask": m, "visible": sorted(v)}
-                        for m, v in self._effective_list
-                    ],
-                    "count": len(self._effective_list),
-                    "total_theoretical": total_combo,
-                    "frequency": dict(freq.most_common()),
-                }
-
-                self._cleanup(context)
-
-                context.scene["zlh_gpu_occlusion_result"] = self._result
-                return context.window_manager.invoke_props_dialog(self, width=700)
-
-            # 设置当前组合的 hide_render
-            removable = self._removable
-            for i in range(self._n_rem):
-                visible = (self._mask >> i) & 1
-                removable[i].hide_render = not visible
-
+        if self._phase == "render_base":
+            # 隐藏所有 removable，只保留 non-removable
+            for obj in self._all_meshes:
+                obj.hide_render = obj in self._removable_objs
             context.view_layer.update()
 
-            # 更新进度
-            wm.progress_update(self._mask)
-            self.report({"INFO"}, f"GPU 遮挡分析: {self._mask}/{total_combo}")
-
-            ok = self._analyze_frame(context)
+            filepath = os.path.join(self._temp_dir, "depth_base.png")
+            ok = _render_depth_to_file(scene, filepath)
             if not ok:
                 wm.progress_end()
-                if self._timer:
-                    wm.event_timer_remove(self._timer)
-                    self._timer = None
                 self._cleanup(context)
-                self.report({"ERROR"}, f"组合 mask={self._mask}: 分析失败，终止")
+                self.report({"ERROR"}, "基准深度渲染失败")
                 return {"CANCELLED"}
 
+            self._depth_nonrem = _read_depth_from_file(filepath)
+            if self._depth_nonrem is None:
+                wm.progress_end()
+                self._cleanup(context)
+                self.report({"ERROR"}, "基准深度读取失败")
+                return {"CANCELLED"}
+
+            _log(f"[gpu_occlusion] 基准深度渲染完成 {self._depth_nonrem.shape}")
+            wm.progress_update(0)
+
+            # 切换到渲染每个 removable
+            self._phase = "render_rm"
+            self._render_idx = 0
+            return {"PASS_THROUGH"}
+
+        elif self._phase == "render_rm":
+            if self._render_idx >= len(self._removable_objs):
+                # 所有深度图渲染完毕，进入推断阶段
+                self._phase = "infer"
+                wm.progress_update(1 + len(self._removable_objs))
+                self.report({"INFO"}, "深度图渲染完成，开始推断有效组合…")
+                return {"PASS_THROUGH"}
+
+            rm_obj = self._removable_objs[self._render_idx]
+            rm_name = rm_obj.name
+
+            # 只显示当前 removable 物体
+            for obj in self._all_meshes:
+                obj.hide_render = (obj != rm_obj)
+            context.view_layer.update()
+
+            filepath = os.path.join(self._temp_dir, f"depth_rm_{self._render_idx}.png")
+            ok = _render_depth_to_file(scene, filepath)
+            if not ok:
+                _log(f"[gpu_occlusion]  {rm_name} 深度渲染失败，跳过")
+                self._depth_rm[rm_name] = np.zeros_like(self._depth_nonrem)
+            else:
+                depth = _read_depth_from_file(filepath)
+                if depth is None:
+                    depth = np.zeros_like(self._depth_nonrem)
+                self._depth_rm[rm_name] = depth
+                _log(f"[gpu_occlusion]  {rm_name} 深度图渲染完成 ({self._render_idx + 1}/{len(self._removable_objs)})")
+
+            wm.progress_update(1 + self._render_idx + 1)
+            self._render_idx += 1
+            return {"PASS_THROUGH"}
+
+        elif self._phase == "infer":
+            # 关闭 timer
+            if self._timer:
+                wm.event_timer_remove(self._timer)
+                self._timer = None
+            wm.progress_end()
+
+            state = self._state
+            result = _infer_combinations_from_depth(
+                depth_nonrem=self._depth_nonrem,
+                depth_rm=self._depth_rm,
+                removable_names=state["removable_names"],
+                non_removable_names=state["non_removable_names"],
+                index_to_name=state["index_to_name"],
+                all_meshes=state["all_meshes"],
+            )
+            self._result = result
+
+            self._cleanup(context)
+
+            context.scene["zlh_gpu_occlusion_result"] = result
+            self._phase = "done"
+            _log(f"[gpu_occlusion] 分析完成: {len(result.get('effective_combinations', []))} 种有效组合")
+            return context.window_manager.invoke_props_dialog(self, width=700)
+
+        elif self._phase == "done":
             return {"PASS_THROUGH"}
 
         return {"PASS_THROUGH"}
